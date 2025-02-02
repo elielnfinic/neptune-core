@@ -204,31 +204,143 @@ pub trait RPC {
     /// The CookieHint provides a location for the cookie file used by this
     /// neptune-core instance as well as the [Network].
     ///
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    ///
+    /// // query neptune-core server how to find the cookie file
+    /// let cookie_hint = client.cookie_hint(context::current()).await.unwrap().unwrap();
+    ///
+    /// # })
+    /// ```
     /// this method does not require authentication because local clients must
     /// be able to call this method in order to bootstrap cookie-based
-    /// authentication.
+    /// authentication. 
+    /// 
     async fn cookie_hint() -> RpcResult<rpc_auth::CookieHint>;
 
     /// Return the network this neptune-core instance is running
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
     ///
-    /// this method does not require authentication because local clients must
-    /// be able to call this method (in fallback mode) in order to bootstrap
-    /// cookie-based authentication
+    /// # tokio_test::block_on(async {
     ///
-    /// Fallback mode occurs when the cookie_hint() RPC method is disabled or
-    /// if end user specifies location of the cookie file manually.
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    ///
+    /// // query neptune-core server the network it is running on.
+    /// let network = client.network(context::current()).await.unwrap().unwrap();
+    ///
+    /// # })
+    /// ```
     async fn network() -> RpcResult<Network>;
 
     /// Returns local socket used for incoming peer-connections. Does not show
     /// the public IP address, as the client does not know this.
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // query neptune-core server to get local socket used for incoming peer-connections.
+    /// let own_listen_address = client.own_listen_address_for_peers(context::current(), token).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn own_listen_address_for_peers(token: rpc_auth::Token) -> RpcResult<Option<SocketAddr>>;
 
     /// Return the node's instance-ID which is a globally unique random generated number
     /// set at startup used to ensure that the node does not connect to itself, or the
     /// same peer twice.
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // query neptune-core server to get own instance ID.
+    /// let own_instance_id = client.own_instance_id(context::current(), token).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn own_instance_id(token: rpc_auth::Token) -> RpcResult<InstanceId>;
 
     /// Returns the current block height.
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // query neptune-core server to get the block height.
+    /// let block_height = client.block_height(context::current(), token).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn block_height(token: rpc_auth::Token) -> RpcResult<BlockHeight>;
 
     /// Returns the number of blocks (confirmations) since wallet balance last changed.
@@ -236,84 +348,602 @@ pub trait RPC {
     /// returns `Option<BlockHeight>`
     ///
     /// return value will be None if wallet has not received any incoming funds.
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // query neptune-core server to get the blocks since wallet balance changed.
+    /// let block_height = client.confirmations(context::current(), token).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn confirmations(token: rpc_auth::Token) -> RpcResult<Option<BlockHeight>>;
 
     /// Returns info about the peers we are connected to
+    ///
+    /// return value will be None if wallet has not received any incoming funds.
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // query neptune-core server to get the info about the peers we are connected to
+    /// let peers = client.peer_info(context::current(), token).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn peer_info(token: rpc_auth::Token) -> RpcResult<Vec<PeerInfo>>;
 
     /// Return info about all peers that have been negatively sanctioned.
+    ///
+    /// return value will be None if wallet has not received any incoming funds.
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // query neptune-core server to get the info about the peers that are negatively sanctioned
+    /// let punished_peers = client.all_punished_peers(context::current(), token).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn all_punished_peers(token: rpc_auth::Token)
         -> RpcResult<HashMap<IpAddr, PeerStanding>>;
 
     /// Returns the digest of the latest n blocks
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // number of latest blocks digests you want to get 
+    /// let n : usize = 10;
+    /// 
+    /// // query neptune-core server to get the digests of the n latest blocks
+    /// let latest_tip_digests = client.latest_tip_digests(context::current(), token, n).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn latest_tip_digests(token: rpc_auth::Token, n: usize) -> RpcResult<Vec<Digest>>;
 
     /// Returns information about the specified block if found
+    /// 
+    /// ```no_run
+    /// use neptune_cash::models::blockchain::block::block_selector::BlockSelector;
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // set the way to look up for a block : it can be `Digest`, `Height`, `Genesis`, `Tip`
+    /// let block_selector : BlockSelector = BlockSelector::Genesis;
+    /// 
+    /// // query neptune-core server to get block info 
+    /// let latest_tip_digests = client.block_info(context::current(), token, block_selector).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn block_info(
         token: rpc_auth::Token,
         block_selector: BlockSelector,
     ) -> RpcResult<Option<BlockInfo>>;
 
     /// Return the digests of known blocks with specified height.
+    /// 
+    /// ```no_run
+    /// use neptune_cash::models::blockchain::block::block_selector::BlockSelector;
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    /// use twenty_first::prelude::*;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    ///
+    /// // set block height value to 12
+    /// let height : BlockHeight = BlockHeight(bfe!(12));
+    /// 
+    /// // query neptune-core server to block digests by height 
+    /// let block_digests_by_height = client.block_digests_by_height(context::current(), token, height).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn block_digests_by_height(
         token: rpc_auth::Token,
         height: BlockHeight,
     ) -> RpcResult<Vec<Digest>>;
 
     /// Return the digest for the specified block if found
+    /// 
+    /// ```no_run
+    /// use neptune_cash::models::blockchain::block::block_selector::BlockSelector;
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // set the way to look up for a block : it can be `Digest`, `Height`, `Genesis`, `Tip`
+    /// let block_selector : BlockSelector = BlockSelector::Tip;
+    /// 
+    /// // query neptune-core server to get block digest 
+    /// let block_digest = client.block_digest(context::current(), token, block_selector).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn block_digest(
         token: rpc_auth::Token,
         block_selector: BlockSelector,
     ) -> RpcResult<Option<Digest>>;
 
     /// Return the digest for the specified UTXO leaf index if found
+    /// 
+    /// ```no_run
+    /// use neptune_cash::models::blockchain::block::block_selector::BlockSelector;
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // leaf index is set to 5
+    /// let leaf_index : u64 = 5;
+    /// 
+    /// // query neptune-core server to get utxo digest 
+    /// let block_digest = client.utxo_digest(context::current(), token, leaf_index).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn utxo_digest(token: rpc_auth::Token, leaf_index: u64) -> RpcResult<Option<Digest>>;
 
     /// Return the block header for the specified block
+    /// 
+    /// ```no_run
+    /// use neptune_cash::models::blockchain::block::block_selector::BlockSelector;
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // set the way to look up for a block : it can be `Digest`, `Height`, `Genesis`, `Tip`
+    /// let block_selector : BlockSelector = BlockSelector::Genesis;
+    /// 
+    /// // query neptune-core server to get block header 
+    /// let block_header = client.header(context::current(), token, block_selector).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn header(
         token: rpc_auth::Token,
         block_selector: BlockSelector,
     ) -> RpcResult<Option<BlockHeader>>;
 
     /// Get sum of unspent UTXOs.
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // query neptune-core server to get sum of unspent UTXO 
+    /// let synced_balance = client.synced_balance(context::current(), token).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn synced_balance(token: rpc_auth::Token) -> RpcResult<NeptuneCoins>;
 
     /// Get sum of unspent UTXOs including mempool transactions.
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // query neptune-core server to get sum of unspent UTXO included mempool transactions
+    /// let synced_balance = client.synced_balance_unconfirmed(context::current(), token).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn synced_balance_unconfirmed(token: rpc_auth::Token) -> RpcResult<NeptuneCoins>;
 
     /// Get the client's wallet transaction history
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // query neptune-core server to get history of transactions, a vec containing digest, block height, timestamp and neptune coins tuples.
+    /// let history_transactions = client.history(context::current()).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn history(
         token: rpc_auth::Token,
     ) -> RpcResult<Vec<(Digest, BlockHeight, Timestamp, NeptuneCoins)>>;
 
     /// Return information about funds in the wallet
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // query neptune-core server to get the funds in the wallet
+    /// let wallet_status = client.wallet_status(context::current(), token).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn wallet_status(token: rpc_auth::Token) -> RpcResult<WalletStatus>;
 
     /// Return the number of expected UTXOs, including already received UTXOs.
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // query neptune-core server to get the number of expected utxos including already received ones. 
+    /// let wallet_status = client.num_expected_utxos(context::current(), token).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn num_expected_utxos(token: rpc_auth::Token) -> RpcResult<u64>;
 
-    /// Return an address that this client can receive funds on
+    /// Return an address that this client can receive funds on 
+    /// Return the number of expected UTXOs, including already received UTXOs.
+    /// 
+    /// ```no_run
+    /// use neptune_cash::models::state::wallet::address::KeyType;
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // set cryptographic key type for receiving funds
+    /// let key_type = KeyType::Symmetric;
+    /// 
+    /// // query neptune-core server to get a receiving address
+    /// let wallet_status = client.next_receiving_address(context::current(), token, key_type).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn next_receiving_address(
         token: rpc_auth::Token,
         key_type: KeyType,
     ) -> RpcResult<ReceivingAddress>;
 
     /// Return all known keys, for every [KeyType]
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // query neptune-core server to get all known keys for every [KeyType]
+    /// let known_keys = client.known_keys(context::current(), token ).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn known_keys(token: rpc_auth::Token) -> RpcResult<Vec<SpendingKey>>;
 
     /// Return known keys for the provided [KeyType]
+    /// 
+    /// ```no_run
+    /// use neptune_cash::models::state::wallet::address::KeyType;
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // set a key type
+    /// let key_type = KeyType::Symmetric;
+    /// 
+    /// // query neptune-core server to get all known keys by [KeyType]
+    /// let known_keys_by_keytype = client.known_keys_by_keytype(context::current(), token, key_type ).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn known_keys_by_keytype(
         token: rpc_auth::Token,
         key_type: KeyType,
     ) -> RpcResult<Vec<SpendingKey>>;
 
-    /// Return the number of transactions in the mempool
+    /// Return the number of transactions in the mempool 
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // query neptune-core server to get the number of transactions in the mempool
+    /// let mempool_tx_count = client.mempool_tx_count(context::current(), token ).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn mempool_tx_count(token: rpc_auth::Token) -> RpcResult<usize>;
 
     // TODO: Change to return current size and max size
     async fn mempool_size(token: rpc_auth::Token) -> RpcResult<usize>;
 
     /// Return info about the transactions in the mempool
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // index to start from in the mempool
+    /// let start_index : usize = 37;
+    /// 
+    /// // number of transactions 
+    /// let number : usize : 8;
+    /// 
+    /// // query neptune-core server to get the info of transactions in the mempool
+    /// let mempool_overview = client.mempool_overview(context::current(), token, start_index, number ).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn mempool_overview(
         token: rpc_auth::Token,
         start_index: usize,
@@ -321,11 +951,68 @@ pub trait RPC {
     ) -> RpcResult<Vec<MempoolTransactionInfo>>;
 
     /// Return the information used on the dashboard's overview tab
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // query neptune-core server to get the info used on dashboard overview tab
+    /// let dashboard_data = client.dashboard_overview_data(context::current(), token).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn dashboard_overview_data(
         token: rpc_auth::Token,
     ) -> RpcResult<DashBoardOverviewDataFromClient>;
 
     /// Determine whether the user-supplied string is a valid address
+    /// 
+    /// ```no_run
+    /// use neptune_cash::config_models::network::Network;
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // address to validate
+    /// let address : String = "0x484389349834834DF23";
+    /// 
+    /// // network type
+    /// let network : Network = Network::Main;
+    /// 
+    /// // query neptune-core server to check if the supplied address is valid
+    /// let is_valid_address = client.validate_address(context::current(), token, address, network).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn validate_address(
         token: rpc_auth::Token,
         address: String,
@@ -333,21 +1020,128 @@ pub trait RPC {
     ) -> RpcResult<Option<ReceivingAddress>>;
 
     /// Determine whether the user-supplied string is a valid amount
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // address to validate
+    /// let amount : String = "132";
+    /// 
+    /// // query neptune-core server to determine if the amount is valid
+    /// let is_valid_address = client.validate_amount(context::current(), token, amount ).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn validate_amount(
         token: rpc_auth::Token,
         amount: String,
     ) -> RpcResult<Option<NeptuneCoins>>;
 
     /// Determine whether the given amount is less than (or equal to) the balance
+    /// 
+    /// ```no_run
+    /// use neptune_cash::models::blockchain::type_scripts::neptune_coins::NeptuneCoins;
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // setting the amount to 47 
+    /// let amount : NeptuneCoins = NeptuneCoins::new(47);
+    /// 
+    /// // query neptune-core server to determine if the amount is less than or equal to the balance 
+    /// let amount_less_or_equals_balance = client.amount_leq_synced_balance(context::current(), token, amount ).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn amount_leq_synced_balance(
         token: rpc_auth::Token,
         amount: NeptuneCoins,
     ) -> RpcResult<bool>;
 
     /// Generate a report of all owned and unspent coins, whether time-locked or not.
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // query neptune-core server to get the list of owned and unspent coins
+    /// let own_coins = client.list_own_coins(context::current(), token ).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn list_own_coins(token: rpc_auth::Token) -> RpcResult<Vec<CoinWithPossibleTimeLock>>;
 
     /// Get CPU temperature.
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // query neptune-core server instance to get its CPU temperature 
+    /// let cpu_temperature = client.cpu_temp(context::current(), token ).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn cpu_temp(token: rpc_auth::Token) -> RpcResult<Option<f32>>;
 
     /******** BLOCKCHAIN STATISTICS ********/
@@ -356,6 +1150,38 @@ pub trait RPC {
     /// Return the block intervals of a range of blocks. Return value is the
     /// number of milliseconds it took to mine the (canonical) block with the
     /// specified height.
+    /// 
+    /// ```no_run
+    /// use neptune_cash::models::blockchain::block::block_selector::BlockSelector;
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // sets the last block
+    /// let last_block : BlockSelector = BlockSelector::Genesis;
+    /// 
+    /// set maximum number of blocks to 5 blocks
+    /// let max_num_blocks : Option<usize> = Some(5);
+    /// 
+    /// // query neptune-core server to get block intervals 
+    /// let block_intervals = client.block_intervals(context::current(), token, last_block, max_num_blocks).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn block_intervals(
         token: rpc_auth::Token,
         last_block: BlockSelector,
@@ -363,6 +1189,38 @@ pub trait RPC {
     ) -> RpcResult<Option<Vec<(u64, u64)>>>;
 
     /// Return the difficulties of a range of blocks.
+    /// 
+    /// ```no_run
+    /// use neptune_cash::models::blockchain::block::block_selector::BlockSelector;
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // sets the last block
+    /// let last_block : BlockSelector = BlockSelector::Genesis;
+    /// 
+    /// set maximum number of blocks to 5 blocks
+    /// let max_num_blocks : Option<usize> = Some(5);
+    /// 
+    /// // query neptune-core server to get difficulties of a range of blocks
+    /// let block_difficulties = client.block_difficulties(context::current(), token, last_block, max_num_blocks).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn block_difficulties(
         token: rpc_auth::Token,
         last_block: BlockSelector,
@@ -373,14 +1231,108 @@ pub trait RPC {
     // Place all things that change state here
 
     /// Clears standing for all peers, connected or not
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // neptune-core server clears standing for all peers that are connected or not 
+    /// let _ = client.clear_all_standings(context::current(), token).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn clear_all_standings(token: rpc_auth::Token) -> RpcResult<()>;
 
     /// Clears standing for ip, whether connected or not
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    /// use std::net::IpAddr;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// // IP address 87.23.90.12 to clear standing
+    /// let ip = IpAddr::V4((87, 23, 90, 12));
+    /// 
+    /// // neptune-core server clears standing for all peers that are connected or not 
+    /// let _ = client.clear_standing_by_ip(context::current(), token, ip).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn clear_standing_by_ip(token: rpc_auth::Token, ip: IpAddr) -> RpcResult<()>;
 
     /// Send coins to a single recipient.
     ///
     /// See docs for [send_to_many()](Self::send_to_many())
+    /// 
+    /// ```no_run
+    /// use neptune_cash::models::blockchain::type_scripts::neptune_coins::NeptuneCoins;
+    /// use neptune_cash::models::state::wallet::address::ReceivingAddress;
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    /// use std::net::IpAddr;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// The amount to send is set to 20 coins
+    /// let amount : NeptuneCoins = NeptuneCoins::new(20);
+    /// 
+    /// The coins receiving address
+    /// let address = ReceivingAddress::from("0x347834DSFDDS".to_string());
+    /// 
+    /// let owned_utxo_notify_method : UtxoNotificationMedium = ;
+    /// 
+    /// let unowned_utxo_notify_medium : UtxoNotificationMedium = ;
+    /// 
+    /// let fee : NeptuneCoins = NeptuneCoins::new(10);
+    /// 
+    /// // neptune-core server sends token to a single receipient
+    /// let send_result = client.send(context::current(), token, amount, address, owned_utxo_notify_method, unowned_utxo_notify_medium).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn send(
         token: rpc_auth::Token,
         amount: NeptuneCoins,
@@ -444,6 +1396,37 @@ pub trait RPC {
     /// if the utxo has already been claimed, this call has no effect.
     ///
     /// Return true if a new expected UTXO was added, otherwise false.
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// Encryted value of utxo transfer
+    /// let utxo_transfer_encrypted = "XXXXXXX".to_string();
+    /// 
+    /// // max search depth is set to 3
+    /// let max_search_depth : Option<u64> = Some(3);
+    /// 
+    /// // claim utxo 
+    /// let utxo_claimed = client.claim_utxo(context::current(), token, utxo_transfer_encrypted, max_search_depth).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn claim_utxo(
         token: rpc_auth::Token,
         utxo_transfer_encrypted: String,
@@ -451,15 +1434,114 @@ pub trait RPC {
     ) -> RpcResult<bool>;
 
     /// Stop miner if running
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    ///
+    ///  // stops miner if running 
+    /// let _ = client.pause_miner(context::current(), token).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn pause_miner(token: rpc_auth::Token) -> RpcResult<()>;
 
     /// Start miner if not running
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    ///
+    ///  // start miner if not running 
+    /// let _ = client.restart_miner(context::current(), token).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn restart_miner(token: rpc_auth::Token) -> RpcResult<()>;
 
     /// mark MUTXOs as abandoned
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    ///
+    ///  // marks mutxos as abandonned  
+    /// let abandonned_monitored_utxos = client.prune_abandoned_monitored_utxos(context::current(), token).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     async fn prune_abandoned_monitored_utxos(token: rpc_auth::Token) -> RpcResult<usize>;
 
     /// Gracious shutdown.
+    /// 
+    /// ```no_run
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    ///
+    ///  // shutdowns the node 
+    /// let is_shutdown = client.shutdown(context::current(), token).await.unwrap().unwrap();
+    /// 
+    /// # })
     async fn shutdown(token: rpc_auth::Token) -> RpcResult<bool>;
 }
 
