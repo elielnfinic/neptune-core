@@ -1320,16 +1320,19 @@ pub trait RPC {
     /// let amount : NeptuneCoins = NeptuneCoins::new(20);
     /// 
     /// The coins receiving address
-    /// let address = ReceivingAddress::from("0x347834DSFDDS".to_string());
+    /// let address = ReceivingAddress::from("0xABDEF11323...".to_string());
     /// 
-    /// let notify_self : UtxoNotificationMedium = ;
+    /// owned utxo notify method
+    /// let notify_self : UtxoNotificationMedium = UtxoNotificationMedium::OnChain;
     /// 
-    /// let notify_other : UtxoNotificationMedium = ;
+    /// unwowned utxo notify method  
+    /// let notify_other : UtxoNotificationMedium = UtxoNotificationMedium::OnChain;
     /// 
+    /// Max fee 
     /// let fee : NeptuneCoins = NeptuneCoins::new(10);
     /// 
     /// // neptune-core server sends token to a single receipient
-    /// let send_result = client.send(context::current(), token, amount, address, notify_self, notify_other).await.unwrap().unwrap();
+    /// let send_result = client.send(context::current(), token, amount, address, notify_self, notify_other, fee).await.unwrap().unwrap();
     /// 
     /// # })
     /// ```
@@ -1373,7 +1376,52 @@ pub trait RPC {
     ///
     /// A list of the encoded transaction notifications is also returned. The relevant notifications
     /// should be sent to the transaction receiver in case `Offchain` notifications are used.
+    /// 
     ///
+    /// See docs for [send_to_many()](Self::send_to_many())
+    /// 
+    /// ```no_run
+    /// use neptune_cash::models::blockchain::type_scripts::neptune_coins::NeptuneCoins;
+    /// use neptune_cash::models::state::wallet::address::ReceivingAddress;
+    /// use neptune_cash::rpc_server::RPCClient;
+    /// use neptune_cash::rpc_auth;
+    /// use tarpc::tokio_serde::formats::Json;
+    /// use tarpc::serde_transport::tcp;
+    /// use tarpc::client;
+    /// use tarpc::context;
+    /// use std::net::IpAddr;
+    ///
+    /// # tokio_test::block_on(async {
+    ///
+    /// // create a serde/json transport over tcp.
+    /// let transport = tcp::connect("127.0.0.1:9799", Json::default).await.unwrap();
+    ///
+    /// // create an rpc client using the transport.
+    /// let client = RPCClient::new(client::Config::default(), transport).spawn();
+    /// 
+    /// // load the cookie file from disk and assign it to a token 
+    /// let token : rpc_auth::Token = rpc_auth::Cookie::try_load(&cookie_hint.data_directory).await.unwrap().into();
+    /// 
+    /// List of addresses and amounts to send
+    /// let outputs : Vec<(ReceivingAddress, NeptuneCoins)> = vec![
+    ///                              (ReceivingAddress::from("0xABDEF11323...".to_string(), NeptuneCoins::new(20)),
+    ///                              (ReceivingAddress::from("0xFBDAF19323...".to_string(), NeptuneCoins::new(57)),
+    ///                       ];
+    /// 
+    /// owned utxo notify method
+    /// let notify_self : UtxoNotificationMedium = UtxoNotificationMedium::OnChain;
+    /// 
+    /// unwowned utxo notify method  
+    /// let notify_other : UtxoNotificationMedium = UtxoNotificationMedium::OnChain;
+    /// 
+    /// Max fee 
+    /// let fee : NeptuneCoins = NeptuneCoins::new(10);
+    /// 
+    /// // neptune-core server sends tokens to multiple receipients
+    /// let send_result = client.send_to_many(context::current(), token, outputs, notify_self, notify_other, fee).await.unwrap().unwrap();
+    /// 
+    /// # })
+    /// ```
     /// future work: add `unowned_utxo_notify_medium` param.
     ///   see comment for [TxOutput::auto()](crate::models::state::wallet::transaction_output::TxOutput::auto())
     async fn send_to_many(
