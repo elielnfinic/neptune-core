@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::models::blockchain::block::Block;
-use crate::models::blockchain::type_scripts::neptune_coins::NeptuneCoins;
+use crate::models::blockchain::type_scripts::native_currency_amount::NativeCurrencyAmount;
 use crate::models::state::wallet::expected_utxo::ExpectedUtxo;
 use crate::models::state::BlockHeight;
 
@@ -19,6 +19,8 @@ pub(crate) enum BlockProposal {
 }
 
 impl BlockProposal {
+    /// Returns the UTXOs for the composer if this is our composition,
+    /// otherwise returns the empty list.
     pub(crate) fn composer_utxos(&self) -> Vec<ExpectedUtxo> {
         match self {
             BlockProposal::OwnComposition((_, utxo_info)) => utxo_info.clone(),
@@ -96,8 +98,8 @@ pub(crate) enum BlockProposalRejectError {
 
     /// Incoming block proposal does not have sufficient fee
     InsufficientFee {
-        current: Option<NeptuneCoins>,
-        received: NeptuneCoins,
+        current: Option<NativeCurrencyAmount>,
+        received: NativeCurrencyAmount,
     },
 }
 

@@ -22,9 +22,9 @@ use crate::prelude::twenty_first;
 #[cfg_attr(any(test, feature = "arbitrary-impls"), derive(Arbitrary))]
 pub struct BlockHeight(BFieldElement);
 
-// Assuming a block time of 588 seconds, and a halving every three years,
-// the number of blocks per halving cycle is 160815.
-pub const BLOCKS_PER_GENERATION: u64 = 160815;
+// Assuming a block time of 294 seconds, and a halving every three years,
+// the number of blocks per halving cycle is 321630.
+pub const BLOCKS_PER_GENERATION: u64 = 321630;
 
 impl BlockHeight {
     pub fn get_generation(&self) -> u64 {
@@ -133,9 +133,10 @@ mod test {
     use tracing_test::traced_test;
 
     use super::*;
+    use crate::models::blockchain::block::block_tests::PREMINE_MAX_SIZE;
     use crate::models::blockchain::block::Block;
     use crate::models::blockchain::block::TARGET_BLOCK_INTERVAL;
-    use crate::models::blockchain::type_scripts::neptune_coins::NeptuneCoins;
+    use crate::models::blockchain::type_scripts::native_currency_amount::NativeCurrencyAmount;
     use crate::models::proof_abstractions::timestamp::Timestamp;
 
     #[traced_test]
@@ -171,10 +172,11 @@ mod test {
             .checked_sub(&generation_0_subsidy)
             .unwrap();
 
-        let designated_premine = NeptuneCoins::new(831488);
+        println!("mineable_amount: {mineable_amount}");
+        let designated_premine = PREMINE_MAX_SIZE;
         let asymptotic_limit = mineable_amount.checked_add(&designated_premine).unwrap();
 
-        let expected_limit = NeptuneCoins::new(42_000_000);
+        let expected_limit = NativeCurrencyAmount::coins(42_000_000);
         assert_eq!(expected_limit, asymptotic_limit);
 
         // Premine is less than promise of 1.98 %
@@ -187,7 +189,7 @@ mod test {
         let actual_premine = Block::premine_distribution()
             .iter()
             .map(|(_receiving_address, amount)| *amount)
-            .sum::<NeptuneCoins>();
+            .sum::<NativeCurrencyAmount>();
         assert!(
             actual_premine <= designated_premine,
             "Distributed premine may not exceed designated value"

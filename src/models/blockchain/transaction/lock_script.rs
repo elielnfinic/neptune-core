@@ -3,7 +3,6 @@ use std::collections::HashMap;
 #[cfg(any(test, feature = "arbitrary-impls"))]
 use arbitrary::Arbitrary;
 use get_size2::GetSize;
-use itertools::Itertools;
 use rand::thread_rng;
 use rand::Rng;
 use serde::Deserialize;
@@ -52,30 +51,6 @@ impl LockScript {
                 halt
             )),
         }
-    }
-
-    /// Generate a lock script that verifies knowledge of a hash preimage.
-    ///
-    /// Satisfaction of this lock script establishes the UTXO owner's assent to
-    /// the transaction.
-    pub fn hash_lock(preimage: Digest) -> Self {
-        let push_spending_lock_digest_to_stack = preimage
-            .values()
-            .iter()
-            .rev()
-            .map(|elem| triton_instr!(push elem.value()))
-            .collect_vec();
-
-        let instructions = triton_asm!(
-            divine 5
-            hash
-            {&push_spending_lock_digest_to_stack}
-            assert_vector
-            read_io 5
-            halt
-        );
-
-        instructions.into()
     }
 
     pub fn hash(&self) -> Digest {
@@ -143,16 +118,6 @@ impl LockScriptAndWitness {
         }
     }
 
-    /// Generate a lock script and a witness for a simple standard
-    /// proof-of-preimage-knowledge lock script.
-    pub(crate) fn hash_lock(unlock_key: Digest) -> Self {
-        let lock_script = LockScript::hash_lock(unlock_key.hash());
-        LockScriptAndWitness::new_with_nondeterminism(
-            lock_script.program,
-            NonDeterminism::new(unlock_key.reversed().values()),
-        )
-    }
-
     pub fn nondeterminism(&self) -> NonDeterminism {
         NonDeterminism::new(self.nd_tokens.clone())
             .with_digests(self.nd_digests.clone())
@@ -210,13 +175,13 @@ mod test {
 
     use super::*;
     use crate::models::blockchain::transaction::primitive_witness::PrimitiveWitness;
-    use crate::models::blockchain::type_scripts::neptune_coins::NeptuneCoins;
+    use crate::models::blockchain::type_scripts::native_currency_amount::NativeCurrencyAmount;
 
     #[proptest]
     fn lock_script_halts_gracefully_prop(
         #[strategy(arb::<Digest>())] txk_mast_hash: Digest,
         #[strategy(arb::<Digest>())] seed: Digest,
-        #[strategy(NeptuneCoins::arbitrary_non_negative())] amount: NeptuneCoins,
+        #[strategy(NativeCurrencyAmount::arbitrary_non_negative())] amount: NativeCurrencyAmount,
     ) {
         let (_utxos, lock_scripts_and_witnesses) =
             PrimitiveWitness::transaction_inputs_from_address_seeds_and_amounts(&[seed], &[amount]);
@@ -228,7 +193,7 @@ mod test {
     fn lock_script_halts_gracefully_unit() {
         let txk_mast_hash = Digest::default();
         let seed = Digest::default();
-        let amount = NeptuneCoins::zero();
+        let amount = NativeCurrencyAmount::zero();
 
         let (_utxos, lock_scripts_and_witnesses) =
             PrimitiveWitness::transaction_inputs_from_address_seeds_and_amounts(&[seed], &[amount]);

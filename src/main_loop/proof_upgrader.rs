@@ -21,7 +21,7 @@ use crate::models::blockchain::transaction::validity::single_proof::SingleProof;
 use crate::models::blockchain::transaction::validity::single_proof::SingleProofWitness;
 use crate::models::blockchain::transaction::Transaction;
 use crate::models::blockchain::transaction::TransactionProof;
-use crate::models::blockchain::type_scripts::neptune_coins::NeptuneCoins;
+use crate::models::blockchain::type_scripts::native_currency_amount::NativeCurrencyAmount;
 use crate::models::proof_abstractions::tasm::program::ConsensusProgram;
 use crate::models::proof_abstractions::tasm::program::TritonVmProofJobOptions;
 use crate::models::proof_abstractions::timestamp::Timestamp;
@@ -58,7 +58,7 @@ pub enum UpgradeJob {
         kernel: TransactionKernel,
         proof: ProofCollection,
         mutator_set: MutatorSetAccumulator,
-        gobbling_fee: NeptuneCoins,
+        gobbling_fee: NativeCurrencyAmount,
     },
     Merge {
         left_kernel: TransactionKernel,
@@ -67,7 +67,7 @@ pub enum UpgradeJob {
         single_proof_right: Proof,
         shuffle_seed: [u8; 32],
         mutator_set: MutatorSetAccumulator,
-        gobbling_fee: NeptuneCoins,
+        gobbling_fee: NativeCurrencyAmount,
     },
     UpdateMutatorSetData(UpdateMutatorSetDataJob),
 }
@@ -153,11 +153,11 @@ impl UpgradeJob {
         }
     }
 
-    fn gobbling_fee(&self) -> NeptuneCoins {
+    fn gobbling_fee(&self) -> NativeCurrencyAmount {
         match self {
             UpgradeJob::ProofCollectionToSingleProof { gobbling_fee, .. } => *gobbling_fee,
             UpgradeJob::Merge { gobbling_fee, .. } => *gobbling_fee,
-            _ => NeptuneCoins::zero(),
+            _ => NativeCurrencyAmount::zero(),
         }
     }
 
@@ -184,7 +184,7 @@ impl UpgradeJob {
     /// Compute the ratio of gobbling fee to number of proofs.
     ///
     /// This number stands in for rate charged for upgrading proofs.
-    fn profitability(&self) -> NeptuneCoins {
+    fn profitability(&self) -> NativeCurrencyAmount {
         match self {
             UpgradeJob::ProofCollectionToSingleProof {
                 proof: collection,
@@ -199,7 +199,7 @@ impl UpgradeJob {
                 rate.div_two();
                 rate
             }
-            _ => NeptuneCoins::zero(),
+            _ => NativeCurrencyAmount::zero(),
         }
     }
 
@@ -281,6 +281,9 @@ impl UpgradeJob {
             let affected_txids = upgrade_job.affected_txids();
             let mutator_set_for_tx = upgrade_job.mutator_set();
 
+            // note: if this task is cancelled, the job will continue
+            // because TritonVmJobOptions::cancel_job_rx is None.
+            // see how compose_task handles cancellation in mine_loop.
             let job_options = global_state_lock.cli().proof_job_options(priority);
 
             // It's a important to *not* hold any locks when proving happens.
@@ -423,7 +426,9 @@ impl UpgradeJob {
             let gobble_receiver = own_wallet_secret.nth_symmetric_key(0);
             let receiver_preimage = gobble_receiver.privacy_preimage();
             let gobble_receiver = SpendingKey::Symmetric(gobble_receiver);
-            let gobble_receiver = gobble_receiver.to_address();
+            let gobble_receiver = gobble_receiver.to_address().expect(
+                "gobble receiver should have a corresponding address because it is a symmetric key",
+            );
             let gobbler = TransactionDetails::fee_gobbler(
                 gobbling_fee,
                 own_wallet_secret.generate_sender_randomness(
@@ -450,7 +455,8 @@ impl UpgradeJob {
                 .collect_vec();
             let gobbler = PrimitiveWitness::from_transaction_details(gobbler);
             let gobbler_proof =
-                SingleProof::produce(&gobbler, triton_vm_job_queue, proof_job_options).await?;
+                SingleProof::produce(&gobbler, triton_vm_job_queue, proof_job_options.clone())
+                    .await?;
             info!("Done producing gobbler-transaction for a value of {gobbling_fee}");
             let gobbler = Transaction {
                 kernel: gobbler.kernel,
@@ -476,7 +482,7 @@ impl UpgradeJob {
                         claim,
                         nondeterminism,
                         triton_vm_job_queue,
-                        proof_job_options,
+                        proof_job_options.clone(),
                     )
                     .await?;
                 info!("Proof-upgrader, to single proof: Done");
@@ -529,7 +535,7 @@ impl UpgradeJob {
                     right,
                     shuffle_seed.to_owned(),
                     triton_vm_job_queue,
-                    proof_job_options,
+                    proof_job_options.clone(),
                 )
                 .await?;
                 info!("Proof-upgrader, merge: Done");
@@ -612,7 +618,7 @@ pub(super) fn get_upgrade_task_from_mempool(
             if gobbling_fee >= min_gobbling_fee && tx_origin == TransactionOrigin::Foreign {
                 gobbling_fee
             } else {
-                NeptuneCoins::zero()
+                NativeCurrencyAmount::zero()
             };
         let upgrade_decision = UpgradeJob::ProofCollectionToSingleProof {
             kernel: kernel.to_owned(),
@@ -648,7 +654,7 @@ pub(super) fn get_upgrade_task_from_mempool(
         let gobbling_fee = if gobbling_fee >= min_gobbling_fee {
             gobbling_fee
         } else {
-            NeptuneCoins::zero()
+            NativeCurrencyAmount::zero()
         };
         let mut rng: StdRng = SeedableRng::from_seed(global_state.shuffle_seed());
         let upgrade_decision = UpgradeJob::Merge {

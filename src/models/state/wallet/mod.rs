@@ -1,12 +1,14 @@
 pub mod address;
 pub mod coin_with_possible_timelock;
-pub mod expected_utxo;
-pub mod monitored_utxo;
-pub mod rusty_wallet_database;
-pub mod transaction_output;
-pub mod unlocked_utxo;
+pub(crate) mod expected_utxo;
+pub(crate) mod incoming_utxo;
+pub(crate) mod monitored_utxo;
+pub(crate) mod rusty_wallet_database;
+pub mod secret_key_material;
+pub(crate) mod transaction_output;
+pub(crate) mod unlocked_utxo;
 pub mod utxo_notification;
-pub mod wallet_state;
+pub(crate) mod wallet_state;
 pub mod wallet_status;
 
 use std::fs;
@@ -14,25 +16,28 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use address::generation_address;
+use address::hash_lock_key;
+use address::hash_lock_key::HashLockKey;
 use address::symmetric_key;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use bip39::Mnemonic;
 use itertools::Itertools;
-use num_traits::Zero;
 use rand::rngs::StdRng;
 use rand::thread_rng;
 use rand::Rng;
 use rand::SeedableRng;
+use secret_key_material::SecretKeyMaterial;
+use secret_key_material::ShamirSecretSharingError;
 use serde::Deserialize;
 use serde::Serialize;
+use tasm_lib::prelude::Tip5;
 use tracing::info;
 use twenty_first::math::b_field_element::BFieldElement;
 use twenty_first::math::bfield_codec::BFieldCodec;
 use twenty_first::math::digest::Digest;
 use twenty_first::math::x_field_element::XFieldElement;
-use zeroize::Zeroize;
 use zeroize::ZeroizeOnDrop;
 
 use crate::models::blockchain::block::block_height::BlockHeight;
@@ -47,15 +52,6 @@ const STANDARD_WALLET_NAME: &str = "standard_wallet";
 const STANDARD_WALLET_VERSION: u8 = 0;
 pub const WALLET_DB_NAME: &str = "wallet";
 pub const WALLET_OUTPUT_COUNT_DB_NAME: &str = "wallout_output_count_db";
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct SecretKeyMaterial(XFieldElement);
-
-impl Zeroize for SecretKeyMaterial {
-    fn zeroize(&mut self) {
-        self.0 = XFieldElement::zero();
-    }
-}
 
 /// Wallet contains the wallet-related data we want to store in a JSON file,
 /// and that is not updated during regular program execution.
@@ -89,7 +85,7 @@ impl WalletSecret {
     }
 
     /// Create new `Wallet` given a `secret` key.
-    fn new(secret_seed: SecretKeyMaterial) -> Self {
+    pub fn new(secret_seed: SecretKeyMaterial) -> Self {
         Self {
             name: STANDARD_WALLET_NAME.to_string(),
             secret_seed,
@@ -205,12 +201,24 @@ impl WalletSecret {
         Ok((wallet, wallet_secret_file_locations))
     }
 
+    /// Returns the spending for guessing on top of the given block.
+    pub(crate) fn guesser_spending_key(&self, prev_block_digest: Digest) -> HashLockKey {
+        HashLockKey::from_preimage(Tip5::hash_varlen(
+            &[
+                self.secret_seed.0.encode(),
+                vec![hash_lock_key::RAW_HASH_LOCK_KEY_FLAG],
+                prev_block_digest.encode(),
+            ]
+            .concat(),
+        ))
+    }
+
     /// derives a generation spending key at `index`
-    ///
-    /// note: this is a read-only method and does not modify wallet state.  When
-    /// requesting a new key for purposes of a new wallet receiving address,
-    /// callers should use [wallet_state::WalletState::next_unused_spending_key()]
-    /// which takes &mut self.
+    //
+    // note: this is a read-only method and does not modify wallet state.  When
+    // requesting a new key for purposes of a new wallet receiving address,
+    // callers should use [wallet_state::WalletState::next_unused_spending_key()]
+    // which takes &mut self.
     pub fn nth_generation_spending_key(
         &self,
         index: u64,
@@ -231,11 +239,11 @@ impl WalletSecret {
     }
 
     /// derives a symmetric key at `index`
-    ///
-    /// note: this is a read-only method and does not modify wallet state.  When
-    /// requesting a new key for purposes of a new wallet receiving address,
-    /// callers should use [wallet_state::WalletState::next_unused_spending_key()]
-    /// which takes &mut self.
+    //
+    // note: this is a read-only method and does not modify wallet state.  When
+    // requesting a new key for purposes of a new wallet receiving address,
+    // callers should use [wallet_state::WalletState::next_unused_spending_key()]
+    // which takes &mut self.
     pub fn nth_symmetric_key(&self, index: u64) -> symmetric_key::SymmetricKey {
         let key_seed = Hash::hash_varlen(
             &[
@@ -404,20 +412,25 @@ impl WalletSecret {
             .collect_vec()
     }
 
-    /// Convert a secret seed phrase (list of 18 valid BIP-39 words) to a WalletSecret
+    /// Convert a secret seed phrase (list of 18 valid BIP-39 words) to a
+    /// [`WalletSecret`]
     pub fn from_phrase(phrase: &[String]) -> Result<Self> {
-        let mnemonic = Mnemonic::from_phrase(&phrase.iter().join(" "), bip39::Language::English)?;
-        let secret_seed: [u8; 24] = mnemonic.entropy().try_into().unwrap();
-        let xfe = XFieldElement::new(
-            secret_seed
-                .chunks(8)
-                .map(|ch| u64::from_le_bytes(ch.try_into().unwrap()))
-                .map(BFieldElement::new)
-                .collect_vec()
-                .try_into()
-                .unwrap(),
-        );
-        Ok(Self::new(SecretKeyMaterial(xfe)))
+        let key = SecretKeyMaterial::from_phrase(phrase)?;
+        Ok(Self::new(key))
+    }
+
+    /// Split the secret across n shares such that combining any t of them
+    /// yields the secret again.
+    ///
+    /// Calls [`SecretKeyMaterial::share_shamir`] on the `secret_seed` field.
+    /// See that method for documentation.
+    pub fn share_shamir(
+        &self,
+        t: usize,
+        n: usize,
+        seed: [u8; 32],
+    ) -> Result<Vec<(usize, SecretKeyMaterial)>, ShamirSecretSharingError> {
+        self.secret_seed.share_shamir(t, n, seed)
     }
 }
 
@@ -425,6 +438,7 @@ impl WalletSecret {
 mod wallet_tests {
     use expected_utxo::ExpectedUtxo;
     use num_traits::CheckedSub;
+    use num_traits::Zero;
     use rand::random;
     use strum::IntoEnumIterator;
     use tracing_test::traced_test;
@@ -447,7 +461,7 @@ mod wallet_tests {
     use crate::models::blockchain::shared::Hash;
     use crate::models::blockchain::transaction::lock_script::LockScript;
     use crate::models::blockchain::transaction::utxo::Utxo;
-    use crate::models::blockchain::type_scripts::neptune_coins::NeptuneCoins;
+    use crate::models::blockchain::type_scripts::native_currency_amount::NativeCurrencyAmount;
     use crate::models::proof_abstractions::timestamp::Timestamp;
     use crate::models::state::tx_proving_capability::TxProvingCapability;
     use crate::models::state::wallet::expected_utxo::UtxoNotifier;
@@ -496,7 +510,7 @@ mod wallet_tests {
             );
 
             // Add 12 blocks and verify that membership proofs are still valid
-            let genesis_block = Block::genesis_block(network);
+            let genesis_block = Block::genesis(network);
             let mut next_block = genesis_block.clone();
             let charlie_wallet = WalletSecret::new_pseudorandom(rng.gen());
             let charlie_key = charlie_wallet.nth_generation_spending_key_for_tests(0);
@@ -547,7 +561,7 @@ mod wallet_tests {
             "Monitored UTXO list must be empty at init"
         );
 
-        let genesis_block = Block::genesis_block(network);
+        let genesis_block = Block::genesis(network);
         let alice_key = alice_wallet
             .wallet_secret
             .nth_generation_spending_key_for_tests(0);
@@ -667,7 +681,7 @@ mod wallet_tests {
             .wallet_state
             .wallet_secret
             .nth_generation_spending_key_for_tests(0);
-        let genesis_block = Block::genesis_block(network);
+        let genesis_block = Block::genesis(network);
 
         let mut rng = thread_rng();
         let (block_1, expected_utxos) =
@@ -684,7 +698,7 @@ mod wallet_tests {
         let liquid_mining_reward = liquid_expected_utxo.utxo.get_native_currency_amount();
         let now = genesis_block.header().timestamp + Timestamp::months(10);
 
-        let allocate_input_utxos = |alice_: GlobalStateLock, amount: NeptuneCoins| async move {
+        let allocate_input_utxos = |alice_: GlobalStateLock, amount: NativeCurrencyAmount| async move {
             let tip_digest = alice_.lock_guard().await.chain.light_state().hash();
             alice_
                 .lock_guard()
@@ -693,12 +707,12 @@ mod wallet_tests {
                 .allocate_sufficient_input_funds(amount, tip_digest, now)
                 .await
         };
-        let num_utxos_in_allocation = |alice_: GlobalStateLock, amount: NeptuneCoins| async move {
+        let num_utxos_in_allocation = |alice_: GlobalStateLock, amount: NativeCurrencyAmount| async move {
             allocate_input_utxos(alice_, amount).await.map(|x| x.len())
         };
 
         assert!(
-            num_utxos_in_allocation(alice.clone(), NeptuneCoins::new(1),)
+            num_utxos_in_allocation(alice.clone(), NativeCurrencyAmount::coins(1),)
                 .await
                 .is_err(),
             "Cannot allocate anything when wallet is empty"
@@ -715,7 +729,7 @@ mod wallet_tests {
         }
 
         // Verify that the allocater returns a sane amount
-        let one_coin = NeptuneCoins::new(1);
+        let one_coin = NativeCurrencyAmount::coins(1);
         assert_eq!(
             1,
             num_utxos_in_allocation(alice.clone(), one_coin)
@@ -807,8 +821,10 @@ mod wallet_tests {
 
         // This block throws away four UTXOs.
         let msa_tip_previous = next_block.mutator_set_accumulator_after().clone();
-        let output_utxo =
-            Utxo::new_native_currency(LockScript::anyone_can_spend(), NeptuneCoins::new(200));
+        let output_utxo = Utxo::new_native_currency(
+            LockScript::anyone_can_spend(),
+            NativeCurrencyAmount::coins(200),
+        );
         let tx_outputs: TxOutputList = vec![TxOutput::no_notification(
             output_utxo,
             random(),
@@ -828,13 +844,7 @@ mod wallet_tests {
             next_block.mutator_set_accumulator_after().hash(),
         );
 
-        let next_block = Block::block_template_invalid_proof(
-            &next_block.clone(),
-            tx,
-            now,
-            Digest::default(),
-            None,
-        );
+        let next_block = Block::block_template_invalid_proof(&next_block.clone(), tx, now, None);
         let final_block_height = Into::<BlockHeight>::into(23u64);
         assert_eq!(final_block_height, next_block.kernel.header.height);
 
@@ -851,21 +861,24 @@ mod wallet_tests {
             alice_balance
                 >= allocate_input_utxos(
                     alice.clone(),
-                    alice_balance.checked_sub(&NeptuneCoins::new(1)).unwrap()
+                    alice_balance
+                        .checked_sub(&NativeCurrencyAmount::coins(1))
+                        .unwrap()
                 )
                 .await
                 .unwrap()
                 .into_iter()
                 .map(|unlocked_utxo: UnlockedUtxo| unlocked_utxo.utxo.get_native_currency_amount())
-                .sum::<NeptuneCoins>()
+                .sum::<NativeCurrencyAmount>()
         );
 
         // Cannot allocate more than we have liquid.
-        assert!(
-            allocate_input_utxos(alice.clone(), alice_balance + NeptuneCoins::new(1))
-                .await
-                .is_err()
-        );
+        assert!(allocate_input_utxos(
+            alice.clone(),
+            alice_balance + NativeCurrencyAmount::coins(1)
+        )
+        .await
+        .is_err());
     }
 
     #[traced_test]
@@ -887,7 +900,7 @@ mod wallet_tests {
             .wallet_secret
             .nth_generation_spending_key_for_tests(0);
         let alice_address = alice_key.to_address();
-        let genesis_block = Block::genesis_block(network);
+        let genesis_block = Block::genesis(network);
         let bob_wallet = mock_genesis_wallet_state(WalletSecret::devnet_wallet(), network)
             .await
             .wallet_secret;
@@ -911,13 +924,13 @@ mod wallet_tests {
             alice_address.privacy_digest(),
         );
         let receiver_data_12_to_alice = TxOutput::offchain_native_currency(
-            NeptuneCoins::new(12),
+            NativeCurrencyAmount::coins(12),
             bob_sender_randomness,
             alice_address.into(),
             false,
         );
         let receiver_data_1_to_alice = TxOutput::offchain_native_currency(
-            NeptuneCoins::new(1),
+            NativeCurrencyAmount::coins(1),
             bob_sender_randomness,
             alice_address.into(),
             false,
@@ -930,7 +943,7 @@ mod wallet_tests {
                 receiver_data_to_alice.clone(),
                 bob_wallet.nth_generation_spending_key_for_tests(0).into(),
                 UtxoNotificationMedium::OnChain,
-                NeptuneCoins::new(2),
+                NativeCurrencyAmount::coins(2),
                 in_seven_months,
                 TxProvingCapability::SingleProof,
                 &TritonVmJobQueue::dummy(),
@@ -954,7 +967,7 @@ mod wallet_tests {
 
         assert_eq!(
             bobs_original_balance
-                .checked_sub(&NeptuneCoins::new(15))
+                .checked_sub(&NativeCurrencyAmount::coins(15))
                 .unwrap(),
             bob.get_wallet_status_for_tip()
                 .await
@@ -1157,7 +1170,7 @@ mod wallet_tests {
         // Fork back to the B-chain with `block_3b` which contains three outputs
         // for Alice, two composer UTXOs and one other UTXO.
         let receiver_data_1_to_alice_new = TxOutput::offchain_native_currency(
-            NeptuneCoins::new(1),
+            NativeCurrencyAmount::coins(1),
             rng.gen(),
             alice_address.into(),
             false,
@@ -1168,7 +1181,7 @@ mod wallet_tests {
                 vec![receiver_data_1_to_alice_new.clone()].into(),
                 bob_wallet.nth_generation_spending_key_for_tests(0).into(),
                 UtxoNotificationMedium::OffChain,
-                NeptuneCoins::new(4),
+                NativeCurrencyAmount::coins(4),
                 block_2_b.header().timestamp + MINIMUM_BLOCK_TIME,
                 TxProvingCapability::SingleProof,
                 &TritonVmJobQueue::dummy(),
@@ -1189,6 +1202,7 @@ mod wallet_tests {
             guesser_fraction,
             block_2_b.header().timestamp + MINIMUM_BLOCK_TIME,
             TxProvingCapability::SingleProof,
+            TritonVmJobPriority::Normal.into(),
         )
         .await
         .unwrap();
@@ -1206,7 +1220,6 @@ mod wallet_tests {
             &block_2_b,
             merged_tx,
             timestamp,
-            Digest::default(),
             None,
             &TritonVmJobQueue::dummy(),
             TritonVmJobPriority::default().into(),
@@ -1214,7 +1227,7 @@ mod wallet_tests {
         .await
         .unwrap();
         assert!(
-            block_3_b.is_valid(&block_2_b, in_seven_months).await,
+            block_3_b.is_valid(&block_2_b, timestamp).await,
             "Block must be valid after accumulating txs"
         );
         let expected_utxos_for_alice_cb = expected_composer_utxos
@@ -1341,7 +1354,7 @@ mod wallet_tests {
     #[tokio::test]
     async fn allow_consumption_of_genesis_output_test() {
         let network = Network::Main;
-        let genesis_block = Block::genesis_block(network);
+        let genesis_block = Block::genesis(network);
         let in_seven_months = genesis_block.kernel.header.timestamp + Timestamp::months(7);
         let bob = mock_genesis_global_state(
             network,
@@ -1365,10 +1378,11 @@ mod wallet_tests {
             guesser_fraction,
             in_seven_months,
             TxProvingCapability::SingleProof,
+            TritonVmJobPriority::Normal.into(),
         )
         .await
         .unwrap();
-        let one_money: NeptuneCoins = NeptuneCoins::new(1);
+        let one_money: NativeCurrencyAmount = NativeCurrencyAmount::coins(1);
         let anyone_can_spend_utxo =
             Utxo::new_native_currency(LockScript::anyone_can_spend(), one_money);
         let tx_output =
@@ -1401,7 +1415,6 @@ mod wallet_tests {
             &genesis_block,
             tx_for_block,
             in_seven_months,
-            Digest::default(),
             None,
             &TritonVmJobQueue::dummy(),
             TritonVmJobPriority::default().into(),
@@ -1606,7 +1619,7 @@ mod wallet_tests {
         async fn verify_premine_receipt_works_with_test_addresses() {
             let network = Network::Main;
             let cli = cli_args::Args::default();
-            let genesis_block = Block::genesis_block(network);
+            let genesis_block = Block::genesis(network);
             let seven_months_after_launch = genesis_block.header().timestamp + Timestamp::months(7);
             for seed_phrase in worker::test_seed_phrases() {
                 let wallet_secret = WalletSecret::from_phrase(&seed_phrase)
@@ -1614,7 +1627,7 @@ mod wallet_tests {
                 let premine_recipient =
                     mock_genesis_global_state(network, 0, wallet_secret, cli.clone()).await;
                 assert_eq!(
-                    NeptuneCoins::new(1),
+                    NativeCurrencyAmount::coins(1),
                     premine_recipient
                         .global_state_lock
                         .lock_guard()

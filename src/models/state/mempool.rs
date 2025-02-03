@@ -55,7 +55,7 @@ use crate::models::blockchain::transaction::transaction_kernel::TransactionKerne
 use crate::models::blockchain::transaction::validity::proof_collection::ProofCollection;
 use crate::models::blockchain::transaction::Transaction;
 use crate::models::blockchain::transaction::TransactionProof;
-use crate::models::blockchain::type_scripts::neptune_coins::NeptuneCoins;
+use crate::models::blockchain::type_scripts::native_currency_amount::NativeCurrencyAmount;
 use crate::models::peer::transfer_transaction::TransactionProofQuality;
 use crate::models::proof_abstractions::timestamp::Timestamp;
 use crate::prelude::twenty_first;
@@ -472,7 +472,7 @@ impl Mempool {
         only_single_proofs: bool,
     ) -> Vec<Transaction> {
         let mut transactions = vec![];
-        let mut _fee_acc = NeptuneCoins::zero();
+        let mut _fee_acc = NativeCurrencyAmount::zero();
 
         for (transaction_digest, _fee_density) in self.get_sorted_iter() {
             // No more transactions can possibly be packed
@@ -781,7 +781,7 @@ impl Mempool {
     /// use neptune_cash::config_models::network::Network;
     ///
     /// let network = Network::Main;
-    /// let genesis_block = Block::genesis_block(network);
+    /// let genesis_block = Block::genesis(network);
     /// let mempool = Mempool::new(ByteSize::gb(1), None, genesis_block.hash());
     /// // insert transactions here.
     /// let mut most_valuable_transactions = vec![];
@@ -826,7 +826,7 @@ mod tests {
     use crate::models::blockchain::transaction::primitive_witness::PrimitiveWitness;
     use crate::models::blockchain::transaction::validity::single_proof::SingleProof;
     use crate::models::blockchain::transaction::Transaction;
-    use crate::models::blockchain::type_scripts::neptune_coins::NeptuneCoins;
+    use crate::models::blockchain::type_scripts::native_currency_amount::NativeCurrencyAmount;
     use crate::models::shared::SIZE_20MB_IN_BYTES;
     use crate::models::state::tx_proving_capability::TxProvingCapability;
     use crate::models::state::wallet::expected_utxo::UtxoNotifier;
@@ -844,7 +844,7 @@ mod tests {
     #[tokio::test]
     pub async fn insert_then_get_then_remove_then_get() {
         let network = Network::Main;
-        let genesis_block = Block::genesis_block(network);
+        let genesis_block = Block::genesis(network);
         let mut mempool = Mempool::new(ByteSize::gb(1), None, genesis_block.hash());
 
         let txs = make_plenty_mock_transaction_with_primitive_witness(2);
@@ -883,7 +883,7 @@ mod tests {
         network: Network,
         origin: TransactionOrigin,
     ) -> Mempool {
-        let genesis_block = Block::genesis_block(network);
+        let genesis_block = Block::genesis(network);
         let mut mempool = Mempool::new(ByteSize::gb(1), None, genesis_block.hash());
         let txs = make_plenty_mock_transaction_with_primitive_witness(transactions_count);
         for tx in txs {
@@ -967,7 +967,7 @@ mod tests {
     async fn most_dense_proof_collection_test() {
         let network = Network::Main;
         let mut mempool = setup_mock_mempool(0, network, TransactionOrigin::Foreign).await;
-        let genesis_block = Block::genesis_block(network);
+        let genesis_block = Block::genesis(network);
         let bob_wallet_secret = WalletSecret::devnet_wallet();
         let bob_spending_key = bob_wallet_secret.nth_generation_spending_key_for_tests(0);
         let bob = mock_genesis_global_state(
@@ -978,7 +978,7 @@ mod tests {
         )
         .await;
         let in_seven_months = genesis_block.kernel.header.timestamp + Timestamp::months(7);
-        let high_fee = NeptuneCoins::new(15);
+        let high_fee = NativeCurrencyAmount::coins(15);
         let (tx_by_bob, _maybe_change_output) = bob
             .lock_guard()
             .await
@@ -1049,7 +1049,7 @@ mod tests {
     #[tokio::test]
     async fn prune_stale_transactions() {
         let network = Network::Alpha;
-        let genesis_block = Block::genesis_block(network);
+        let genesis_block = Block::genesis(network);
         let mut mempool = Mempool::new(ByteSize::gb(1), None, genesis_block.hash());
         assert!(
             mempool.is_empty(),
@@ -1104,7 +1104,7 @@ mod tests {
 
         // Ensure that both wallets have a non-zero balance by letting Alice
         // mine a block.
-        let genesis_block = Block::genesis_block(network);
+        let genesis_block = Block::genesis(network);
         let (block_1, expected_1) =
             make_mock_block(&genesis_block, None, alice_key, rng.gen()).await;
 
@@ -1121,7 +1121,7 @@ mod tests {
         // Create a transaction that's valid to be included in block 2
         let mut utxos_from_bob = TxOutputList::from(vec![]);
         for i in 0..4 {
-            let amount: NeptuneCoins = NeptuneCoins::new(i);
+            let amount: NativeCurrencyAmount = NativeCurrencyAmount::coins(i);
             utxos_from_bob.push(TxOutput::onchain_native_currency(
                 amount,
                 rng.gen(),
@@ -1140,7 +1140,7 @@ mod tests {
                 utxos_from_bob.clone(),
                 bob_spending_key.into(),
                 UtxoNotificationMedium::OnChain,
-                NeptuneCoins::new(1),
+                NativeCurrencyAmount::coins(1),
                 in_seven_months,
                 TxProvingCapability::SingleProof,
                 &TritonVmJobQueue::dummy(),
@@ -1169,7 +1169,7 @@ mod tests {
         // updated with block 2. Also: The transaction must be valid after block 2 as the mempool
         // manager must keep mutator set data updated.
         let utxos_from_alice = vec![TxOutput::onchain_native_currency(
-            NeptuneCoins::new(62),
+            NativeCurrencyAmount::coins(30),
             rng.gen(),
             alice_address.into(),
             true,
@@ -1181,7 +1181,7 @@ mod tests {
                 utxos_from_alice.into(),
                 alice_key.into(),
                 UtxoNotificationMedium::OffChain,
-                NeptuneCoins::new(1),
+                NativeCurrencyAmount::coins(1),
                 in_seven_months,
                 TxProvingCapability::SingleProof,
                 &TritonVmJobQueue::dummy(),
@@ -1218,6 +1218,7 @@ mod tests {
             guesser_fraction,
             in_eight_months,
             TxProvingCapability::SingleProof,
+            TritonVmJobPriority::Normal.into(),
         )
         .await
         .unwrap();
@@ -1230,13 +1231,8 @@ mod tests {
             )
             .await
             .unwrap();
-        let block_2 = Block::block_template_invalid_proof(
-            &block_1,
-            block_transaction,
-            in_eight_months,
-            Digest::default(),
-            None,
-        );
+        let block_2 =
+            Block::block_template_invalid_proof(&block_1, block_transaction, in_eight_months, None);
 
         // Update the mempool with block 2 and verify that the mempool now only contains one tx
         assert_eq!(2, mempool.len());
@@ -1299,6 +1295,7 @@ mod tests {
             guesser_fraction,
             block_5_timestamp,
             TxProvingCapability::SingleProof,
+            TritonVmJobPriority::Normal.into(),
         )
         .await
         .unwrap();
@@ -1315,7 +1312,6 @@ mod tests {
             &previous_block,
             block_tx_5,
             block_5_timestamp,
-            Digest::default(),
             None,
         );
         assert_eq!(Into::<BlockHeight>::into(5), block_5.kernel.header.height);
@@ -1394,7 +1390,7 @@ mod tests {
         // Verify that a merged transaction replaces the two transactions that
         // are the input into the merge.
         let network = Network::Main;
-        let genesis_block = Block::genesis_block(network);
+        let genesis_block = Block::genesis(network);
         let mut mempool = Mempool::new(ByteSize::gb(1), None, genesis_block.hash());
 
         let ((left, right), merged) = merge_tx_triplet().await;
@@ -1462,7 +1458,7 @@ mod tests {
         let bob_address = bob_key.to_address();
 
         let tx_receiver_data = TxOutput::onchain_native_currency(
-            NeptuneCoins::new(1),
+            NativeCurrencyAmount::coins(1),
             rng.gen(),
             bob_address.into(),
             false,
@@ -1484,7 +1480,7 @@ mod tests {
                 vec![tx_receiver_data].into(),
                 alice_key.into(),
                 UtxoNotificationMedium::OffChain,
-                NeptuneCoins::new(1),
+                NativeCurrencyAmount::coins(1),
                 in_seven_years,
                 proving_capability,
                 &TritonVmJobQueue::dummy(),
@@ -1592,12 +1588,14 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(589111u64);
 
         let make_transaction_with_fee =
-            |fee: NeptuneCoins, preminer_clone: GlobalStateLock, sender_randomness: Digest| async move {
+            |fee: NativeCurrencyAmount,
+             preminer_clone: GlobalStateLock,
+             sender_randomness: Digest| async move {
                 let in_seven_months =
-                    Block::genesis_block(network).kernel.header.timestamp + Timestamp::months(7);
+                    Block::genesis(network).kernel.header.timestamp + Timestamp::months(7);
 
                 let receiver_data = TxOutput::offchain_native_currency(
-                    NeptuneCoins::new(1),
+                    NativeCurrencyAmount::coins(1),
                     sender_randomness,
                     premine_address.into(),
                     false,
@@ -1625,7 +1623,8 @@ mod tests {
 
         // Insert transaction into mempool
         let tx_low_fee =
-            make_transaction_with_fee(NeptuneCoins::new(1), preminer.clone(), rng.gen()).await;
+            make_transaction_with_fee(NativeCurrencyAmount::coins(1), preminer.clone(), rng.gen())
+                .await;
         {
             let mempool = &mut preminer.lock_guard_mut().await.mempool;
             mempool.insert(tx_low_fee.clone(), TransactionOrigin::Foreign);
@@ -1636,7 +1635,8 @@ mod tests {
         // Insert a transaction that spends the same UTXO and has a higher fee.
         // Verify that this replaces the previous transaction.
         let tx_high_fee =
-            make_transaction_with_fee(NeptuneCoins::new(10), preminer.clone(), rng.gen()).await;
+            make_transaction_with_fee(NativeCurrencyAmount::coins(10), preminer.clone(), rng.gen())
+                .await;
         {
             let mempool = &mut preminer.lock_guard_mut().await.mempool;
             mempool.insert(tx_high_fee.clone(), TransactionOrigin::Foreign);
@@ -1650,8 +1650,12 @@ mod tests {
         // Insert a conflicting transaction with a lower fee and verify that it
         // does *not* replace the existing transaction.
         {
-            let tx_medium_fee =
-                make_transaction_with_fee(NeptuneCoins::new(4), preminer.clone(), rng.gen()).await;
+            let tx_medium_fee = make_transaction_with_fee(
+                NativeCurrencyAmount::coins(4),
+                preminer.clone(),
+                rng.gen(),
+            )
+            .await;
             let mempool = &mut preminer.lock_guard_mut().await.mempool;
             mempool.insert(tx_medium_fee.clone(), TransactionOrigin::Foreign);
             assert_eq!(1, mempool.len());
@@ -1667,7 +1671,7 @@ mod tests {
     #[tokio::test]
     async fn single_proof_flag_is_respected() {
         let network = Network::Main;
-        let genesis_block = Block::genesis_block(network);
+        let genesis_block = Block::genesis(network);
         let txs = make_plenty_mock_transaction_with_primitive_witness(11);
         let mut mempool = Mempool::new(ByteSize::gb(1), None, genesis_block.hash());
         for tx in txs {
@@ -1686,7 +1690,7 @@ mod tests {
     #[tokio::test]
     async fn max_len_none() {
         let network = Network::Main;
-        let genesis_block = Block::genesis_block(network);
+        let genesis_block = Block::genesis(network);
         let txs = make_plenty_mock_transaction_with_primitive_witness(11);
         let mut mempool = Mempool::new(ByteSize::gb(1), None, genesis_block.hash());
 
@@ -1705,7 +1709,7 @@ mod tests {
     #[tokio::test]
     async fn max_len_is_respected() {
         let network = Network::Main;
-        let genesis_block = Block::genesis_block(network);
+        let genesis_block = Block::genesis(network);
         let txs = make_plenty_mock_transaction_with_primitive_witness(20);
 
         let mut expected_txs = txs.clone();
@@ -1782,9 +1786,9 @@ mod tests {
         async fn tx_with_proof_type(
             proof_type: TxProvingCapability,
             network: Network,
-            fee: NeptuneCoins,
+            fee: NativeCurrencyAmount,
         ) -> Transaction {
-            let genesis_block = Block::genesis_block(network);
+            let genesis_block = Block::genesis(network);
             let bob_wallet_secret = WalletSecret::devnet_wallet();
             let bob_spending_key = bob_wallet_secret.nth_generation_spending_key_for_tests(0);
             let bob = mock_genesis_global_state(
@@ -1820,14 +1824,14 @@ mod tests {
             let pw_high_fee = tx_with_proof_type(
                 TxProvingCapability::PrimitiveWitness,
                 network,
-                NeptuneCoins::new(15),
+                NativeCurrencyAmount::coins(15),
             )
             .await;
             let mut mempool = setup_mock_mempool(0, network, TransactionOrigin::Foreign).await;
             mempool.insert(pw_high_fee, TransactionOrigin::Own);
             assert!(mempool.len().is_one(), "One tx after insertion");
 
-            let low_fee = NeptuneCoins::new(1);
+            let low_fee = NativeCurrencyAmount::coins(1);
             let sp_low_fee =
                 tx_with_proof_type(TxProvingCapability::SingleProof, network, low_fee).await;
             let txid = sp_low_fee.kernel.txid();
@@ -1850,14 +1854,14 @@ mod tests {
             let pc_high_fee = tx_with_proof_type(
                 TxProvingCapability::ProofCollection,
                 network,
-                NeptuneCoins::new(15),
+                NativeCurrencyAmount::coins(15),
             )
             .await;
             let mut mempool = setup_mock_mempool(0, network, TransactionOrigin::Foreign).await;
             mempool.insert(pc_high_fee, TransactionOrigin::Own);
             assert!(mempool.len().is_one(), "One tx after insertion");
 
-            let low_fee = NeptuneCoins::new(1);
+            let low_fee = NativeCurrencyAmount::coins(1);
             let sp_low_fee =
                 tx_with_proof_type(TxProvingCapability::SingleProof, network, low_fee).await;
             let txid = sp_low_fee.kernel.txid();
@@ -1880,14 +1884,14 @@ mod tests {
             let pc_high_fee = tx_with_proof_type(
                 TxProvingCapability::PrimitiveWitness,
                 network,
-                NeptuneCoins::new(15),
+                NativeCurrencyAmount::coins(15),
             )
             .await;
             let mut mempool = setup_mock_mempool(0, network, TransactionOrigin::Foreign).await;
             mempool.insert(pc_high_fee, TransactionOrigin::Own);
             assert!(mempool.len().is_one(), "One tx after insertion");
 
-            let low_fee = NeptuneCoins::new(1);
+            let low_fee = NativeCurrencyAmount::coins(1);
             let sp_low_fee =
                 tx_with_proof_type(TxProvingCapability::ProofCollection, network, low_fee).await;
             let txid = sp_low_fee.kernel.txid();

@@ -230,9 +230,12 @@ impl SingleProof {
         triton_vm_job_queue: &TritonVmJobQueue,
         proof_job_options: TritonVmProofJobOptions,
     ) -> anyhow::Result<Proof> {
-        let proof_collection =
-            ProofCollection::produce(primitive_witness, triton_vm_job_queue, proof_job_options)
-                .await?;
+        let proof_collection = ProofCollection::produce(
+            primitive_witness,
+            triton_vm_job_queue,
+            proof_job_options.clone(),
+        )
+        .await?;
         let single_proof_witness = SingleProofWitness::from_collection(proof_collection);
         let claim = single_proof_witness.claim();
         let nondeterminism = single_proof_witness.nondeterminism();
@@ -789,7 +792,7 @@ mod test {
     }
 
     mod proof_collection_tests {
-        use tasm_lib::hashing::merkle_verify::MERKLE_AUTHENTICATION_ROOT_MISMATCH_ERROR;
+        use tasm_lib::hashing::merkle_verify::MerkleVerify;
 
         use super::*;
 
@@ -838,7 +841,7 @@ mod test {
                 .test_assertion_failure(
                     bad_witness.standard_input(),
                     bad_witness.nondeterminism(),
-                    &[MERKLE_AUTHENTICATION_ROOT_MISMATCH_ERROR],
+                    &[MerkleVerify::ROOT_MISMATCH_ERROR_ID],
                 )
                 .unwrap();
         }
@@ -946,7 +949,7 @@ mod test {
         use rand::rngs::StdRng;
         use rand::Rng;
         use rand::SeedableRng;
-        use tasm_lib::hashing::merkle_verify::MERKLE_AUTHENTICATION_ROOT_MISMATCH_ERROR;
+        use tasm_lib::hashing::merkle_verify::MerkleVerify;
         use twenty_first::prelude::Mmr;
 
         use crate::models::blockchain::transaction::transaction_kernel::TransactionKernelModifier;
@@ -1042,7 +1045,7 @@ mod test {
                 SingleProof,
                 &input,
                 nondeterminism,
-                &[MERKLE_AUTHENTICATION_ROOT_MISMATCH_ERROR],
+                &[MerkleVerify::ROOT_MISMATCH_ERROR_ID],
             );
         }
 
@@ -1069,7 +1072,7 @@ mod test {
                 SingleProof,
                 &input,
                 nondeterminism,
-                &[MERKLE_AUTHENTICATION_ROOT_MISMATCH_ERROR],
+                &[MerkleVerify::ROOT_MISMATCH_ERROR_ID],
             );
         }
 

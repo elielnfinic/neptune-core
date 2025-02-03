@@ -44,7 +44,8 @@ use futures::Future;
 use futures::StreamExt;
 use models::blockchain::block::Block;
 use models::blockchain::shared::Hash;
-use models::peer::PeerInfo;
+use models::peer::handshake_data::HandshakeData;
+use models::peer::peer_info::PeerInfo;
 use prelude::tasm_lib;
 use prelude::triton_vm;
 use prelude::twenty_first;
@@ -68,7 +69,6 @@ use crate::models::channel::MainToPeerTask;
 use crate::models::channel::MinerToMain;
 use crate::models::channel::PeerTaskToMain;
 use crate::models::channel::RPCServerToMain;
-use crate::models::peer::HandshakeData;
 use crate::models::state::archival_state::ArchivalState;
 use crate::models::state::blockchain_state::BlockchainArchivalState;
 use crate::models::state::blockchain_state::BlockchainState;
@@ -158,8 +158,7 @@ pub async fn initialize(cli_args: cli_args::Args) -> Result<i32> {
 
     // Create handshake data which is used when connecting to outgoing peers specified in the
     // CLI arguments
-    let syncing = false;
-    let networking_state = NetworkingState::new(peer_map, peer_databases, syncing);
+    let networking_state = NetworkingState::new(peer_map, peer_databases);
 
     let light_state: LightState = LightState::from(latest_block.clone());
     let blockchain_archival_state = BlockchainArchivalState {
@@ -179,6 +178,46 @@ pub async fn initialize(cli_args: cli_args::Args) -> Result<i32> {
         cli_args,
         mempool,
     );
+
+    // See #239.  <https://github.com/Neptune-Crypto/neptune-core/issues/239>
+    //
+    // We set a panic hook in order to catch all panics, including those that
+    // would ordinarily be swallowed by the tokio runtime.
+    //
+    // If a panic occurs, we must flush the databases to prevent any possible
+    // corruption before exiting.
+    let global_state_lock_hook = global_state_lock.clone();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let mut msg = "Caught panic.\n".to_string();
+
+        // Print the stack trace
+        if let Some(location) = panic_info.location() {
+            msg += &format!("  location: {}\n", location);
+        }
+
+        if let Some(payload) = panic_info.payload().downcast_ref::<&str>() {
+            msg += &format!("  message: {}\n", payload);
+        }
+
+        msg += &format!("  backtrace:\n{}", std::backtrace::Backtrace::capture());
+
+        tracing::error!("{}", msg);
+
+        // we need to flush databases, which is async call. So we spawn a new task.
+        let mut global_state_lock_panic = global_state_lock_hook.clone();
+        let handle = tokio::spawn(async move {
+            tracing::info!("Flushing Database...");
+            let _ = global_state_lock_panic.flush_databases().await;
+            tracing::info!("*** DB flush complete. now exiting.  Bye! ****");
+
+            std::process::exit(1);
+        });
+        // wait for spawned task to complete.
+        while !handle.is_finished() {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }));
+
     let own_handshake_data: HandshakeData = global_state_lock
         .lock_guard()
         .await

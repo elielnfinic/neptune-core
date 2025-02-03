@@ -3,16 +3,23 @@ use std::fmt::Display;
 #[cfg(any(test, feature = "arbitrary-impls"))]
 use arbitrary::Arbitrary;
 use get_size2::GetSize;
+use num_traits::Zero;
 use serde::Deserialize;
 use serde::Serialize;
 use strum::EnumCount;
+use tasm_lib::prelude::Tip5;
+use tasm_lib::twenty_first::bfe_array;
+use tasm_lib::twenty_first::prelude::MerkleTree;
 use twenty_first::math::b_field_element::BFieldElement;
 use twenty_first::math::bfield_codec::BFieldCodec;
 use twenty_first::math::digest::Digest;
 
 use super::block_height::BlockHeight;
+use super::difficulty_control::difficulty_control;
 use super::difficulty_control::Difficulty;
 use super::difficulty_control::ProofOfWork;
+use super::Block;
+use crate::config_models::network::Network;
 use crate::models::proof_abstractions::mast_hash::HasDiscriminant;
 use crate::models::proof_abstractions::mast_hash::MastHash;
 use crate::models::proof_abstractions::timestamp::Timestamp;
@@ -20,8 +27,8 @@ use crate::prelude::twenty_first;
 
 /// Desired/average time between blocks.
 ///
-/// 588000 milliseconds equals 9.8 minutes.
-pub(crate) const TARGET_BLOCK_INTERVAL: Timestamp = Timestamp::millis(588000);
+/// 294000 milliseconds equals 4.9 minutes.
+pub(crate) const TARGET_BLOCK_INTERVAL: Timestamp = Timestamp::millis(294000);
 
 /// Minimum time between blocks.
 ///
@@ -60,7 +67,7 @@ pub(crate) const ADVANCE_DIFFICULTY_CORRECTION_FACTOR: usize = 4;
 
 pub(crate) const BLOCK_HEADER_VERSION: BFieldElement = BFieldElement::new(0);
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, BFieldCodec, GetSize)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, BFieldCodec, GetSize)]
 #[cfg_attr(any(test, feature = "arbitrary-impls"), derive(Arbitrary))]
 pub struct BlockHeader {
     pub version: BFieldElement,
@@ -77,6 +84,9 @@ pub struct BlockHeader {
 
     /// The difficulty for the *next* block. Unit: expected # hashes
     pub difficulty: Difficulty,
+
+    /// The lock after-image for the guesser fee UTXOs
+    pub(crate) guesser_digest: Digest,
 }
 
 impl Display for BlockHeader {
@@ -96,6 +106,51 @@ impl Display for BlockHeader {
     }
 }
 
+impl BlockHeader {
+    pub(crate) fn genesis(network: Network) -> Self {
+        Self {
+            version: BFieldElement::zero(),
+            height: BFieldElement::zero().into(),
+            prev_block_digest: Default::default(),
+            timestamp: network.launch_date(),
+
+            // TODO: to be set to something difficult to predict ahead of time
+            nonce: Digest::new(bfe_array![0, 0, 0, 0, 0]),
+            cumulative_proof_of_work: ProofOfWork::zero(),
+            difficulty: Difficulty::MINIMUM,
+            guesser_digest: Digest::default(),
+        }
+    }
+
+    pub(crate) fn template_header(
+        predecessor_header: &BlockHeader,
+        predecessor_digest: Digest,
+        timestamp: Timestamp,
+        target_block_interval: Option<Timestamp>,
+    ) -> BlockHeader {
+        let difficulty = difficulty_control(
+            timestamp,
+            predecessor_header.timestamp,
+            predecessor_header.difficulty,
+            target_block_interval,
+            predecessor_header.height,
+        );
+
+        let new_cumulative_proof_of_work: ProofOfWork =
+            predecessor_header.cumulative_proof_of_work + predecessor_header.difficulty;
+        Self {
+            version: BLOCK_HEADER_VERSION,
+            height: predecessor_header.height.next(),
+            prev_block_digest: predecessor_digest,
+            timestamp,
+            nonce: Digest::default(),
+            cumulative_proof_of_work: new_cumulative_proof_of_work,
+            difficulty,
+            guesser_digest: Digest::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, EnumCount)]
 pub enum BlockHeaderField {
     Version,
@@ -105,6 +160,7 @@ pub enum BlockHeaderField {
     Nonce,
     CumulativeProofOfWork,
     Difficulty,
+    GusserDigest,
 }
 
 impl HasDiscriminant for BlockHeaderField {
@@ -125,7 +181,56 @@ impl MastHash for BlockHeader {
             self.nonce.encode(),
             self.cumulative_proof_of_work.encode(),
             self.difficulty.encode(),
+            self.guesser_digest.encode(),
         ]
+    }
+}
+
+/// The data needed to calculate the block hash, apart from the data present
+/// in the block header.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HeaderToBlockHashWitness {
+    /// The "body" leaf of the Merkle tree from which block hash is calculated.
+    body_leaf: Digest,
+
+    /// The "appendix" leaf of the Merkle tree from which block hash is
+    /// calculated.
+    appendix_leaf: Digest,
+}
+
+impl From<&Block> for HeaderToBlockHashWitness {
+    fn from(value: &Block) -> Self {
+        Self {
+            body_leaf: Tip5::hash_varlen(&value.body().mast_hash().encode()),
+            appendix_leaf: Tip5::hash_varlen(&value.appendix().encode()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct BlockHeaderWithBlockHashWitness {
+    pub(crate) header: BlockHeader,
+    witness: HeaderToBlockHashWitness,
+}
+
+impl BlockHeaderWithBlockHashWitness {
+    pub(crate) fn new(header: BlockHeader, witness: HeaderToBlockHashWitness) -> Self {
+        Self { header, witness }
+    }
+
+    pub(crate) fn hash(&self) -> Digest {
+        let block_header_leaf = Tip5::hash_varlen(&self.header.mast_hash().encode());
+        let leafs = [
+            block_header_leaf,
+            self.witness.body_leaf,
+            self.witness.appendix_leaf,
+            Digest::default(),
+        ];
+        MerkleTree::sequential_new(&leafs).unwrap().root()
+    }
+
+    pub(crate) fn is_successor_of(&self, parent: &Self) -> bool {
+        self.header.prev_block_digest == parent.hash()
     }
 }
 
@@ -135,6 +240,7 @@ pub(crate) mod block_header_tests {
     use rand::Rng;
 
     use super::*;
+    use crate::models::blockchain::block::validity::block_primitive_witness::test::deterministic_block_primitive_witness;
 
     pub fn random_block_header() -> BlockHeader {
         let mut rng = thread_rng();
@@ -146,6 +252,7 @@ pub(crate) mod block_header_tests {
             nonce: rng.gen(),
             cumulative_proof_of_work: rng.gen(),
             difficulty: rng.gen(),
+            guesser_digest: rng.gen(),
         }
     }
     #[test]
@@ -166,5 +273,19 @@ pub(crate) mod block_header_tests {
             ADVANCE_DIFFICULTY_CORRECTION_FACTOR,
             1 << ADVANCE_DIFFICULTY_CORRECTION_FACTOR.ilog2()
         );
+    }
+
+    #[test]
+    fn witness_agrees_with_block_hash() {
+        let block_primitive_witness = deterministic_block_primitive_witness();
+        let block = Block::block_template_invalid_proof_from_witness(
+            block_primitive_witness,
+            Timestamp::now(),
+            None,
+        );
+        let expected = block.hash();
+        let witness: HeaderToBlockHashWitness = (&block).into();
+        let calculated = BlockHeaderWithBlockHashWitness::new(*block.header(), witness).hash();
+        assert_eq!(expected, calculated);
     }
 }
