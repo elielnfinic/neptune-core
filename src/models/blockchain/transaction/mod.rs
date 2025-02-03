@@ -7,10 +7,7 @@ use crate::models::proof_abstractions::tasm::program::TritonVmProofJobOptions;
 use crate::models::proof_abstractions::timestamp::Timestamp;
 use crate::models::proof_abstractions::SecretWitness;
 use crate::models::state::transaction_details::TransactionDetails;
-use crate::models::state::wallet::expected_utxo::ExpectedUtxo;
-use crate::models::state::wallet::expected_utxo::UtxoNotifier;
 use crate::prelude::twenty_first;
-use crate::util_types::mutator_set::commit;
 
 pub mod lock_script;
 pub mod primitive_witness;
@@ -30,12 +27,10 @@ use serde::Deserialize;
 use serde::Serialize;
 use tasm_lib::prelude::Digest;
 use tasm_lib::prelude::TasmObject;
-use tasm_lib::triton_vm::prelude::Tip5;
 use tasm_lib::twenty_first::util_types::mmr::mmr_successor_proof::MmrSuccessorProof;
 use tracing::info;
 use twenty_first::math::b_field_element::BFieldElement;
 use twenty_first::math::bfield_codec::BFieldCodec;
-use utxo::Utxo;
 use validity::proof_collection::ProofCollection;
 use validity::single_proof::SingleProof;
 use validity::single_proof::SingleProofWitness;
@@ -49,52 +44,7 @@ use self::transaction_kernel::TransactionKernelProxy;
 use crate::models::proof_abstractions::verifier::verify;
 use crate::triton_vm::proof::Claim;
 use crate::triton_vm::proof::Proof;
-use crate::util_types::mutator_set::addition_record::AdditionRecord;
 use crate::util_types::mutator_set::mutator_set_accumulator::MutatorSetAccumulator;
-
-/// represents a utxo and secrets necessary for recipient to claim it.
-///
-/// these are built from one of:
-///   onchain symmetric-key public announcements
-///   onchain asymmetric-key public announcements
-///   offchain expected-utxos
-///
-/// See [PublicAnnouncement], [ExpectedUtxo]
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct AnnouncedUtxo {
-    pub utxo: Utxo,
-    pub sender_randomness: Digest,
-    pub receiver_preimage: Digest,
-}
-
-impl From<&ExpectedUtxo> for AnnouncedUtxo {
-    fn from(eu: &ExpectedUtxo) -> Self {
-        Self {
-            utxo: eu.utxo.clone(),
-            sender_randomness: eu.sender_randomness,
-            receiver_preimage: eu.receiver_preimage,
-        }
-    }
-}
-
-impl AnnouncedUtxo {
-    pub(crate) fn addition_record(&self) -> AdditionRecord {
-        commit(
-            Tip5::hash(&self.utxo),
-            self.sender_randomness,
-            self.receiver_preimage.hash(),
-        )
-    }
-
-    pub(crate) fn into_expected_utxo(self, received_from: UtxoNotifier) -> ExpectedUtxo {
-        ExpectedUtxo::new(
-            self.utxo.to_owned(),
-            self.sender_randomness,
-            self.receiver_preimage,
-            received_from,
-        )
-    }
-}
 
 /// represents arbitrary data that can be stored in a transaction on the public blockchain
 ///
@@ -373,7 +323,8 @@ mod tests {
     use tests::primitive_witness::SaltedUtxos;
 
     use super::*;
-    use crate::models::blockchain::type_scripts::neptune_coins::NeptuneCoins;
+    use crate::models::blockchain::type_scripts::native_currency_amount::NativeCurrencyAmount;
+    use crate::util_types::mutator_set::addition_record::AdditionRecord;
     use crate::util_types::mutator_set::ms_membership_proof::MsMembershipProof;
     use crate::util_types::mutator_set::removal_record::RemovalRecord;
 
@@ -479,7 +430,7 @@ mod tests {
             inputs: vec![],
             outputs: vec![],
             public_announcements: vec![],
-            fee: NeptuneCoins::new(0),
+            fee: NativeCurrencyAmount::coins(0),
             coinbase: None,
             timestamp: Default::default(),
             mutator_set_hash: Digest::default(),
@@ -517,7 +468,7 @@ mod transaction_tests {
     use super::*;
     use crate::config_models::network::Network;
     use crate::job_queue::triton_vm::TritonVmJobPriority;
-    use crate::models::blockchain::type_scripts::neptune_coins::NeptuneCoins;
+    use crate::models::blockchain::type_scripts::native_currency_amount::NativeCurrencyAmount;
     use crate::models::proof_abstractions::timestamp::Timestamp;
     use crate::tests::shared::make_mock_transaction;
     use crate::tests::shared::mock_block_from_transaction_and_msa;
@@ -526,8 +477,10 @@ mod transaction_tests {
     #[traced_test]
     #[test]
     fn tx_get_timestamp_test() {
-        let output_1 =
-            Utxo::new_native_currency(LockScript::anyone_can_spend(), NeptuneCoins::new(42));
+        let output_1 = Utxo::new_native_currency(
+            LockScript::anyone_can_spend(),
+            NativeCurrencyAmount::coins(42),
+        );
         let ar = commit(Tip5::hash(&output_1), random(), random());
 
         // Verify that a sane timestamp is returned. `make_mock_transaction` must follow

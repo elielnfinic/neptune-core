@@ -51,6 +51,7 @@ use crate::config_models::data_directory::DataDirectory;
 use crate::config_models::network::Network;
 use crate::database::storage::storage_vec::traits::StorageVecBase;
 use crate::database::NeptuneLevelDb;
+use crate::job_queue::triton_vm::TritonVmJobPriority;
 use crate::job_queue::JobQueue;
 use crate::mine_loop::composer_parameters::ComposerParameters;
 use crate::mine_loop::make_coinbase_transaction_stateless;
@@ -78,16 +79,16 @@ use crate::models::blockchain::transaction::validity::tasm::single_proof::merge_
 use crate::models::blockchain::transaction::PublicAnnouncement;
 use crate::models::blockchain::transaction::Transaction;
 use crate::models::blockchain::transaction::TransactionProof;
-use crate::models::blockchain::type_scripts::neptune_coins::NeptuneCoins;
+use crate::models::blockchain::type_scripts::native_currency_amount::NativeCurrencyAmount;
 use crate::models::blockchain::type_scripts::time_lock::neptune_arbitrary::arbitrary_primitive_witness_with_expired_timelocks;
 use crate::models::channel::MainToPeerTask;
 use crate::models::channel::PeerTaskToMain;
 use crate::models::database::BlockIndexKey;
 use crate::models::database::BlockIndexValue;
 use crate::models::database::PeerDatabases;
-use crate::models::peer::HandshakeData;
-use crate::models::peer::PeerConnectionInfo;
-use crate::models::peer::PeerInfo;
+use crate::models::peer::handshake_data::VersionString;
+use crate::models::peer::peer_info::PeerConnectionInfo;
+use crate::models::peer::peer_info::PeerInfo;
 use crate::models::peer::PeerMessage;
 use crate::models::proof_abstractions::mast_hash::MastHash;
 use crate::models::proof_abstractions::timestamp::Timestamp;
@@ -112,7 +113,9 @@ use crate::prelude::twenty_first;
 use crate::util_types::mutator_set::addition_record::AdditionRecord;
 use crate::util_types::mutator_set::mutator_set_accumulator::MutatorSetAccumulator;
 use crate::util_types::mutator_set::removal_record::RemovalRecord;
+use crate::HandshakeData;
 use crate::PEER_CHANNEL_CAPACITY;
+use crate::VERSION;
 
 /// Return an empty peer map
 pub fn get_peer_map() -> HashMap<SocketAddr, PeerInfo> {
@@ -144,29 +147,29 @@ pub fn get_dummy_socket_address(count: u8) -> SocketAddr {
 /// Get a dummy-peer representing an outgoing connection.
 pub(crate) fn get_dummy_peer(address: SocketAddr) -> PeerInfo {
     let peer_connection_info = PeerConnectionInfo::new(Some(8080), address, false);
+    let peer_handhake = get_dummy_handshake_data_for_genesis(Network::Main);
     PeerInfo::new(
         peer_connection_info,
-        rand::random(),
+        &peer_handhake,
         SystemTime::now(),
-        get_dummy_version(),
-        true,
         cli_args::Args::default().peer_tolerance,
     )
 }
 
-pub fn get_dummy_version() -> String {
-    "0.0.10".to_string()
+pub fn get_dummy_version() -> VersionString {
+    VersionString::try_from_str(VERSION).unwrap()
 }
 
 /// Return a handshake object with a randomly set instance ID
-pub async fn get_dummy_handshake_data_for_genesis(network: Network) -> HandshakeData {
+pub(crate) fn get_dummy_handshake_data_for_genesis(network: Network) -> HandshakeData {
     HandshakeData {
         instance_id: rand::random(),
-        tip_header: Block::genesis_block(network).header().to_owned(),
+        tip_header: Block::genesis(network).header().to_owned(),
         listen_port: Some(8080),
         network,
         version: get_dummy_version(),
         is_archival_node: true,
+        timestamp: SystemTime::now(),
     }
 }
 
@@ -178,11 +181,11 @@ pub(crate) fn to_bytes(message: &PeerMessage) -> Result<Bytes> {
     Ok(buf.freeze())
 }
 
-pub async fn get_dummy_peer_connection_data_genesis(
+pub(crate) fn get_dummy_peer_connection_data_genesis(
     network: Network,
     id: u8,
 ) -> (HandshakeData, SocketAddr) {
-    let handshake = get_dummy_handshake_data_for_genesis(network).await;
+    let handshake = get_dummy_handshake_data_for_genesis(network);
     let socket_address = get_dummy_socket_address(id);
 
     (handshake, socket_address)
@@ -202,14 +205,13 @@ pub(crate) async fn mock_genesis_global_state(
 ) -> GlobalStateLock {
     let (archival_state, peer_db, _data_dir) = mock_genesis_archival_state(network).await;
 
-    let syncing = false;
     let mut peer_map: HashMap<SocketAddr, PeerInfo> = get_peer_map();
     for i in 0..peer_count {
         let peer_address =
             std::net::SocketAddr::from_str(&format!("123.123.123.{}:8080", i)).unwrap();
         peer_map.insert(peer_address, get_dummy_peer(peer_address));
     }
-    let networking_state = NetworkingState::new(peer_map, peer_db, syncing);
+    let networking_state = NetworkingState::new(peer_map, peer_db);
     let genesis_block = archival_state.get_tip().await;
 
     // Sanity check
@@ -271,7 +273,7 @@ pub(crate) async fn get_test_genesis_setup(
         to_main_tx,
         _to_main_rx1,
         state,
-        get_dummy_handshake_data_for_genesis(network).await,
+        get_dummy_handshake_data_for_genesis(network),
     ))
 }
 
@@ -284,7 +286,9 @@ pub(crate) async fn add_block_to_archival_state(
 
     archival_state.update_mutator_set(&new_block).await.unwrap();
 
-    archival_state.add_to_archival_block_mmr(&new_block).await;
+    archival_state
+        .append_to_archival_block_mmr(&new_block)
+        .await;
 
     Ok(())
 }
@@ -407,17 +411,17 @@ pub fn pseudorandom_option<T>(seed: [u8; 32], thing: T) -> Option<T> {
     }
 }
 
-pub fn pseudorandom_amount(seed: [u8; 32]) -> NeptuneCoins {
+pub fn pseudorandom_amount(seed: [u8; 32]) -> NativeCurrencyAmount {
     let mut rng: StdRng = SeedableRng::from_seed(seed);
     let number: u128 = rng.gen::<u128>() >> 10;
-    NeptuneCoins::from_nau(number.into()).unwrap()
+    NativeCurrencyAmount::from_nau(number.into()).unwrap()
 }
 
 pub fn pseudorandom_utxo(seed: [u8; 32]) -> Utxo {
     let mut rng: StdRng = SeedableRng::from_seed(seed);
     (
         rng.gen(),
-        NeptuneCoins::new(rng.gen_range(0..42000000)).to_native_coins(),
+        NativeCurrencyAmount::coins(rng.gen_range(0..42000000)).to_native_coins(),
     )
         .into()
 }
@@ -442,7 +446,7 @@ pub fn random_public_announcement() -> PublicAnnouncement {
     pseudorandom_public_announcement(rng.gen::<[u8; 32]>())
 }
 
-pub fn random_amount() -> NeptuneCoins {
+pub fn random_amount() -> NativeCurrencyAmount {
     let mut rng = thread_rng();
     pseudorandom_amount(rng.gen::<[u8; 32]>())
 }
@@ -519,7 +523,7 @@ pub(crate) fn make_mock_transaction_with_mutator_set_hash(
             inputs,
             outputs,
             public_announcements: vec![],
-            fee: NeptuneCoins::new(1),
+            fee: NativeCurrencyAmount::coins(1),
             timestamp,
             coinbase: None,
             mutator_set_hash,
@@ -532,7 +536,10 @@ pub(crate) fn make_mock_transaction_with_mutator_set_hash(
 
 pub(crate) fn dummy_expected_utxo() -> ExpectedUtxo {
     ExpectedUtxo {
-        utxo: Utxo::new_native_currency(LockScript::anyone_can_spend(), NeptuneCoins::zero()),
+        utxo: Utxo::new_native_currency(
+            LockScript::anyone_can_spend(),
+            NativeCurrencyAmount::zero(),
+        ),
         addition_record: AdditionRecord::new(Default::default()),
         sender_randomness: Default::default(),
         receiver_preimage: Default::default(),
@@ -554,7 +561,7 @@ pub(crate) fn mock_item_and_randomnesses() -> (Digest, Digest, Digest) {
 pub fn make_mock_transaction_with_wallet(
     inputs: Vec<RemovalRecord>,
     outputs: Vec<AdditionRecord>,
-    fee: NeptuneCoins,
+    fee: NativeCurrencyAmount,
     _wallet_state: &WalletState,
     timestamp: Option<Timestamp>,
 ) -> Transaction {
@@ -589,7 +596,7 @@ pub(crate) fn mock_block_from_transaction_and_msa(
     mutator_set_before: MutatorSetAccumulator,
     network: Network,
 ) -> Block {
-    let genesis_block = Block::genesis_block(network);
+    let genesis_block = Block::genesis(network);
     let new_block_height: BlockHeight = BlockHeight::from(100u64);
     let block_header = BlockHeader {
         version: bfe!(0),
@@ -597,6 +604,7 @@ pub(crate) fn mock_block_from_transaction_and_msa(
         prev_block_digest: genesis_block.hash().hash(),
         timestamp: tx_kernel.timestamp,
         nonce: Digest::default(),
+        guesser_digest: Digest::default(),
         cumulative_proof_of_work: genesis_block.header().cumulative_proof_of_work,
         difficulty: genesis_block.header().difficulty,
     };
@@ -628,6 +636,7 @@ pub(crate) fn invalid_block_with_transaction(
         prev_block_digest: previous_block.hash(),
         timestamp: transaction.kernel.timestamp,
         nonce: Digest::default(),
+        guesser_digest: Digest::default(),
         cumulative_proof_of_work: previous_block.header().cumulative_proof_of_work,
         difficulty: previous_block.header().difficulty,
     };
@@ -656,16 +665,16 @@ pub(crate) fn invalid_block_with_transaction(
 }
 
 /// Build a fake and invalid block where the caller can specify the
-/// nonce-preimage and guesser fraction.
+/// guesser-preimage and guesser fraction.
 ///
 /// Returns (block, composer's expected UTXOs).
-pub(crate) async fn make_mock_block_with_nonce_preimage_and_guesser_fraction(
+pub(crate) async fn make_mock_block_guesser_preimage_and_guesser_fraction(
     previous_block: &Block,
     block_timestamp: Option<Timestamp>,
     composer_key: generation_address::GenerationSpendingKey,
     seed: [u8; 32],
     guesser_fraction: f64,
-    nonce_preimage: Digest,
+    guesser_preimage: Digest,
 ) -> (Block, Vec<ExpectedUtxo>) {
     let mut rng: StdRng = SeedableRng::from_seed(seed);
 
@@ -688,17 +697,13 @@ pub(crate) async fn make_mock_block_with_nonce_preimage_and_guesser_fraction(
         block_timestamp,
         TxProvingCapability::PrimitiveWitness,
         &JobQueue::dummy(),
+        (TritonVmJobPriority::Normal, None).into(),
     )
     .await
     .unwrap();
 
-    let block = Block::block_template_invalid_proof(
-        previous_block,
-        tx,
-        block_timestamp,
-        nonce_preimage,
-        None,
-    );
+    let mut block = Block::block_template_invalid_proof(previous_block, tx, block_timestamp, None);
+    block.set_header_guesser_digest(guesser_preimage.hash());
 
     let composer_expected_utxos = composer_txos
         .iter()
@@ -725,19 +730,15 @@ pub(crate) async fn make_mock_block(
     composer_key: generation_address::GenerationSpendingKey,
     seed: [u8; 32],
 ) -> (Block, Vec<ExpectedUtxo>) {
-    let nonce_preimage = Digest::default();
-    let (block, composer_expected_utxos) =
-        make_mock_block_with_nonce_preimage_and_guesser_fraction(
-            previous_block,
-            block_timestamp,
-            composer_key,
-            seed,
-            0f64,
-            nonce_preimage,
-        )
-        .await;
-
-    (block, composer_expected_utxos)
+    make_mock_block_guesser_preimage_and_guesser_fraction(
+        previous_block,
+        block_timestamp,
+        composer_key,
+        seed,
+        0f64,
+        Digest::default(),
+    )
+    .await
 }
 
 /// Return a dummy-wallet used for testing. The returned wallet is populated with
@@ -805,20 +806,20 @@ pub(crate) async fn mine_block_to_wallet_invalid_block_proof(
         .light_state()
         .to_owned();
 
-    let (transaction, expected_composer_utxos) =
-        crate::mine_loop::create_block_transaction(&tip_block, global_state_lock, timestamp)
-            .await?;
-
-    let nonce_preimage = Digest::default();
-    let block = Block::block_template_invalid_proof(
+    let (transaction, expected_composer_utxos) = crate::mine_loop::create_block_transaction(
         &tip_block,
-        transaction,
+        global_state_lock,
         timestamp,
-        nonce_preimage,
-        None,
-    );
+        (TritonVmJobPriority::Normal, None).into(),
+    )
+    .await?;
+
+    let guesser_preimage = Digest::default();
+    let mut block = Block::block_template_invalid_proof(&tip_block, transaction, timestamp, None);
+    block.set_header_guesser_digest(guesser_preimage.hash());
+
     let expected_utxos = block
-        .guesser_fee_expected_utxos(nonce_preimage)
+        .guesser_fee_expected_utxos(guesser_preimage)
         .into_iter()
         .chain(expected_composer_utxos)
         .collect_vec();
@@ -837,24 +838,21 @@ pub(crate) fn invalid_empty_block(predecessor: &Block) -> Block {
         predecessor.mutator_set_accumulator_after().hash(),
     );
     let timestamp = predecessor.header().timestamp + Timestamp::hours(1);
-    Block::block_template_invalid_proof(predecessor, tx, timestamp, Digest::default(), None)
+    Block::block_template_invalid_proof(predecessor, tx, timestamp, None)
 }
 
-/// Create a block from a transaction without the hassle of proving but such
-/// that it appears valid.
-pub(crate) async fn fake_valid_block_from_tx_for_tests(
+/// Create a fake block proposal; will pass `is_valid` but fail pow-check. Will
+/// be a valid block except for proof and PoW.
+pub(crate) async fn fake_valid_block_proposal_from_tx(
     predecessor: &Block,
     tx: Transaction,
-    seed: [u8; 32],
 ) -> Block {
-    let mut rng = StdRng::from_seed(seed);
     let timestamp = tx.kernel.timestamp;
 
     let primitive_witness = BlockPrimitiveWitness::new(predecessor.to_owned(), tx);
 
     let body = primitive_witness.body().to_owned();
-    let nonce_preimage = rng.gen::<Digest>();
-    let header = primitive_witness.header(timestamp, nonce_preimage.hash(), None);
+    let header = primitive_witness.header(timestamp, None);
     let (appendix, proof) = {
         let block_proof_witness = BlockProofWitness::produce(primitive_witness)
             .await
@@ -865,11 +863,21 @@ pub(crate) async fn fake_valid_block_from_tx_for_tests(
         (appendix, BlockProof::SingleProof(Proof(vec![])))
     };
 
-    let mut block = Block::new(header, body, appendix, proof);
+    Block::new(header, body, appendix, proof)
+}
 
-    let threshold = predecessor.header().difficulty.target();
+/// Create a block from a transaction without the hassle of proving but such
+/// that it appears valid.
+pub(crate) async fn fake_valid_block_from_tx_for_tests(
+    predecessor: &Block,
+    tx: Transaction,
+    seed: [u8; 32],
+) -> Block {
+    let mut block = fake_valid_block_proposal_from_tx(predecessor, tx).await;
+
+    let mut rng = StdRng::from_seed(seed);
     while !block.has_proof_of_work(predecessor.header()) {
-        mine_iteration_for_tests(&mut block, threshold, &mut rng);
+        mine_iteration_for_tests(&mut block, &mut rng);
     }
 
     block
@@ -955,10 +963,11 @@ pub(crate) async fn fake_create_block_transaction_for_tests(
     Ok((block_transaction, composer_txos))
 }
 
-pub(crate) async fn fake_valid_successor_for_tests(
+async fn fake_block_successor(
     predecessor: &Block,
     timestamp: Timestamp,
     seed: [u8; 32],
+    with_valid_pow: bool,
 ) -> Block {
     let mut rng = StdRng::from_seed(seed);
 
@@ -977,7 +986,27 @@ pub(crate) async fn fake_valid_successor_for_tests(
     .await
     .unwrap();
 
-    fake_valid_block_from_tx_for_tests(predecessor, block_tx, rng.gen()).await
+    if with_valid_pow {
+        fake_valid_block_from_tx_for_tests(predecessor, block_tx, rng.gen()).await
+    } else {
+        fake_valid_block_proposal_from_tx(predecessor, block_tx).await
+    }
+}
+
+pub(crate) async fn fake_valid_block_proposal_successor_for_test(
+    predecessor: &Block,
+    timestamp: Timestamp,
+    seed: [u8; 32],
+) -> Block {
+    fake_block_successor(predecessor, timestamp, seed, false).await
+}
+
+pub(crate) async fn fake_valid_successor_for_tests(
+    predecessor: &Block,
+    timestamp: Timestamp,
+    seed: [u8; 32],
+) -> Block {
+    fake_block_successor(predecessor, timestamp, seed, true).await
 }
 
 /// Create a block with coinbase going to self. For testing purposes.
@@ -1002,15 +1031,34 @@ pub(crate) async fn fake_valid_block_for_tests(
 ///
 /// Sequence is N-long. Every block i with i > 0 has block i-1 as its
 /// predecessor; block 0 has the `predecessor` argument as predecessor. Every
-/// block is valid in terms of both `is_valid` and `has_proof_of_work`.
+/// block is valid in terms of both `is_valid` and `has_proof_of_work`. But
+/// the STARK proofs are mocked.
 pub(crate) async fn fake_valid_sequence_of_blocks_for_tests<const N: usize>(
-    mut predecessor: &Block,
+    predecessor: &Block,
     block_interval: Timestamp,
     seed: [u8; 32],
 ) -> [Block; N] {
+    fake_valid_sequence_of_blocks_for_tests_dyn(predecessor, block_interval, seed, N)
+        .await
+        .try_into()
+        .unwrap()
+}
+
+/// Create a deterministic sequence of valid blocks.
+///
+/// Sequence is N-long. Every block i with i > 0 has block i-1 as its
+/// predecessor; block 0 has the `predecessor` argument as predecessor. Every
+/// block is valid in terms of both `is_valid` and `has_proof_of_work`. But
+/// the STARK proofs are mocked.
+pub(crate) async fn fake_valid_sequence_of_blocks_for_tests_dyn(
+    mut predecessor: &Block,
+    block_interval: Timestamp,
+    seed: [u8; 32],
+    n: usize,
+) -> Vec<Block> {
     let mut blocks = vec![];
     let mut rng: StdRng = SeedableRng::from_seed(seed);
-    for _ in 0..N {
+    for _ in 0..n {
         let block = fake_valid_successor_for_tests(
             predecessor,
             predecessor.header().timestamp + block_interval,
@@ -1020,7 +1068,7 @@ pub(crate) async fn fake_valid_sequence_of_blocks_for_tests<const N: usize>(
         blocks.push(block);
         predecessor = blocks.last().unwrap();
     }
-    blocks.try_into().unwrap()
+    blocks
 }
 
 pub(crate) async fn wallet_state_has_all_valid_mps(

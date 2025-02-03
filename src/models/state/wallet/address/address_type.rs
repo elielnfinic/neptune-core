@@ -11,14 +11,15 @@ use tracing::warn;
 
 use super::common;
 use super::generation_address;
+use super::hash_lock_key;
 use super::symmetric_key;
 use crate::config_models::network::Network;
 use crate::models::blockchain::transaction::lock_script::LockScript;
 use crate::models::blockchain::transaction::lock_script::LockScriptAndWitness;
 use crate::models::blockchain::transaction::transaction_kernel::TransactionKernel;
 use crate::models::blockchain::transaction::utxo::Utxo;
-use crate::models::blockchain::transaction::AnnouncedUtxo;
 use crate::models::blockchain::transaction::PublicAnnouncement;
+use crate::models::state::wallet::incoming_utxo::IncomingUtxo;
 use crate::models::state::wallet::utxo_notification::UtxoNotificationPayload;
 use crate::BFieldElement;
 
@@ -29,10 +30,15 @@ use crate::BFieldElement;
 // anyway it is a desirable property that KeyType variants match the values
 // actually stored in PublicAnnouncement.
 
-/// enumerates available cryptographic key implementations for sending and receiving funds.
+/// Enumerates available cryptographic key implementations for sending funds.
+///
+/// In most (but not all) cases there is a matching address.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[repr(u8)]
 pub enum KeyType {
+    /// To unlock, prove knowledge of the preimage.
+    RawHashLock = hash_lock_key::RAW_HASH_LOCK_KEY_FLAG_U8,
+
     /// [generation_address] built on [crate::prelude::twenty_first::math::lattice::kem]
     ///
     /// wraps a symmetric key built on aes-256-gcm
@@ -45,6 +51,7 @@ pub enum KeyType {
 impl std::fmt::Display for KeyType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::RawHashLock => write!(f, "Raw Hash Lock"),
             Self::Generation => write!(f, "Generation"),
             Self::Symmetric => write!(f, "Symmetric"),
         }
@@ -65,6 +72,7 @@ impl From<&SpendingKey> for KeyType {
         match addr {
             SpendingKey::Generation(_) => Self::Generation,
             SpendingKey::Symmetric(_) => Self::Symmetric,
+            SpendingKey::RawHashLock { .. } => Self::RawHashLock,
         }
     }
 }
@@ -90,6 +98,13 @@ impl TryFrom<&PublicAnnouncement> for KeyType {
 impl KeyType {
     /// returns all available `KeyType`
     pub fn all_types() -> Vec<KeyType> {
+        vec![Self::RawHashLock, Self::Generation, Self::Symmetric]
+    }
+
+    /// Returns only those key types that can receive UTXOs, i.e. the key types
+    /// that other people can send to and that have an associated address.
+    #[cfg(test)]
+    pub(crate) fn all_types_for_receiving() -> Vec<KeyType> {
         vec![Self::Generation, Self::Symmetric]
     }
 }
@@ -197,7 +212,7 @@ impl ReceivingAddress {
     pub fn spending_lock(&self) -> Digest {
         match self {
             Self::Generation(a) => a.spending_lock(),
-            Self::Symmetric(k) => k.spending_lock(),
+            Self::Symmetric(k) => k.lock_after_image(),
         }
     }
 
@@ -345,13 +360,19 @@ impl ReceivingAddress {
     }
 }
 
-/// Represents any type of Neptune spending key.
+/// Represents cryptographic data necessary for spending funds (or, more
+/// specifically, fo unlocking UTXOs).
 ///
 /// This enum provides an abstraction API for spending key types, so that a
 /// method or struct may simply accept a `SpendingKey` and be
 /// forward-compatible with new types of spending key as they are implemented.
+///
+/// Note that not all spending keys have associated receiving addresses. In
+/// particular, the `HashLock` variant has no associated address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SpendingKey {
+    RawHashLock(hash_lock_key::HashLockKey),
+
     /// a key from [generation_address]
     Generation(generation_address::GenerationSpendingKey),
 
@@ -379,10 +400,11 @@ impl From<symmetric_key::SymmetricKey> for SpendingKey {
 
 impl SpendingKey {
     /// returns the address that corresponds to this spending key.
-    pub fn to_address(&self) -> ReceivingAddress {
+    pub fn to_address(&self) -> Option<ReceivingAddress> {
         match self {
-            Self::Generation(k) => k.to_address().into(),
-            Self::Symmetric(k) => (*k).into(),
+            Self::Generation(k) => Some(k.to_address().into()),
+            Self::Symmetric(k) => Some((*k).into()),
+            Self::RawHashLock(_) => None,
         }
     }
 
@@ -393,51 +415,94 @@ impl SpendingKey {
                 generation_spending_key.lock_script_and_witness()
             }
             SpendingKey::Symmetric(symmetric_key) => symmetric_key.lock_script_and_witness(),
+            SpendingKey::RawHashLock(raw_hash_lock) => raw_hash_lock.lock_script_and_witness(),
         }
     }
 
-    /// returns the privacy preimage.
+    pub(crate) fn lock_script(&self) -> LockScript {
+        LockScript {
+            program: self.lock_script_and_witness().program,
+        }
+    }
+
+    pub(crate) fn lock_script_hash(&self) -> Digest {
+        self.lock_script().hash()
+    }
+
+    /// Return the privacy preimage if this spending key has a corresponding
+    /// receiving address.
     ///
     /// note: The hash of the preimage is available in the receiving address
     /// as the privacy_digest
-    pub fn privacy_preimage(&self) -> Digest {
+    pub fn privacy_preimage(&self) -> Option<Digest> {
         match self {
-            Self::Generation(k) => k.privacy_preimage(),
-            Self::Symmetric(k) => k.privacy_preimage(),
+            Self::Generation(k) => Some(k.privacy_preimage()),
+            Self::Symmetric(k) => Some(k.privacy_preimage()),
+            Self::RawHashLock { .. } => None,
         }
     }
 
-    /// returns the receiver_identifier, a public fingerprint
-    pub fn receiver_identifier(&self) -> BFieldElement {
+    /// Return the receiver_identifier if this spending key has a corresponding
+    /// receiving address.
+    ///
+    /// The receiver identifier is a public (=readably by anyone) fingerprint of
+    /// the beneficiary's receiving address. It is used to efficiently scan
+    /// incoming blocks for new UTXOs that are destined for this key.
+    ///
+    /// However, the fingerprint can *also* be used to link different payments
+    /// to the same address as payments to the same person. Users who want to
+    /// avoid this linkability must generate a new address. Down the line we
+    /// expect to support address formats that do not come with fingerprints,
+    /// and users can enable them for better privacy in exchange for the
+    /// increased workload associated with detecting incoming UTXOs.
+    pub fn receiver_identifier(&self) -> Option<BFieldElement> {
         match self {
-            Self::Generation(k) => k.receiver_identifier(),
-            Self::Symmetric(k) => k.receiver_identifier(),
+            Self::Generation(k) => Some(k.receiver_identifier()),
+            Self::Symmetric(k) => Some(k.receiver_identifier()),
+            Self::RawHashLock { .. } => None,
         }
     }
 
-    /// decrypts an array of BFieldElement into a [Utxo] and [Digest] representing `sender_randomness`.
-    pub fn decrypt(&self, ciphertext_bfes: &[BFieldElement]) -> Result<(Utxo, Digest)> {
-        match self {
+    /// Decrypt a slice of BFieldElement into a [Utxo] and [Digest] representing
+    /// `sender_randomness`, if this spending key has a corresponding receiving
+    /// address.
+    ///
+    /// # Return Value
+    ///
+    ///  - `None` if this spending key has no associated receiving address.
+    ///  - `Some(Err(..))` if decryption failed.
+    ///  - `Some(Ok(..))` if decryption succeeds.
+    pub fn decrypt(&self, ciphertext_bfes: &[BFieldElement]) -> Option<Result<(Utxo, Digest)>> {
+        let result = match self {
             Self::Generation(k) => k.decrypt(ciphertext_bfes),
-            Self::Symmetric(k) => Ok(k.decrypt(ciphertext_bfes)?),
-        }
+            Self::Symmetric(k) => k.decrypt(ciphertext_bfes).map_err(anyhow::Error::new),
+            Self::RawHashLock { .. } => {
+                return None;
+            }
+        };
+        Some(result)
     }
 
-    /// scans public announcements in a `Transaction` and finds any that match this key
+    /// Scans all public announcements in a `Transaction` and return all
+    /// UTXOs that are recognized by this spending key.
     ///
-    /// note that a single `Transaction` may represent an entire block
+    /// Note that a single `Transaction` may represent an entire block.
     ///
-    /// returns an iterator over [AnnouncedUtxo]
+    /// # Side Effects
     ///
-    /// side-effect: logs a warning for any announcement targeted at this key
-    /// that cannot be decypted.
-    pub fn scan_for_announced_utxos<'a>(
-        &'a self,
-        tx_kernel: &'a TransactionKernel,
-    ) -> impl Iterator<Item = AnnouncedUtxo> + 'a {
-        // pre-compute some fields.
-        let receiver_identifier = self.receiver_identifier();
-        let receiver_preimage = self.privacy_preimage();
+    ///  - Logs a warning for any announcement targeted at this key that cannot
+    ///    be decypted.
+    pub(crate) fn scan_for_announced_utxos(
+        &self,
+        tx_kernel: &TransactionKernel,
+    ) -> Vec<IncomingUtxo> {
+        // pre-compute some fields, and early-abort if key cannot receive.
+        let Some(receiver_identifier) = self.receiver_identifier() else {
+            return vec![];
+        };
+        let Some(receiver_preimage) = self.privacy_preimage() else {
+            return vec![];
+        };
 
         // for all public announcements
         tx_kernel
@@ -456,26 +521,29 @@ impl SpendingKey {
             .filter_map(|pa| self.ok_warn(common::ciphertext_from_public_announcement(pa)))
 
             // ... which can be decrypted with this key
-            .filter_map(|c| self.ok_warn(self.decrypt(&c)))
+            .filter_map(|c| self.ok_warn(self.decrypt(&c).expect("non-hash-lock key should have decryption option")))
 
             // ... map to AnnouncedUtxo
             .map(move |(utxo, sender_randomness)| {
                 // and join those with the receiver digest to get a commitment
                 // Note: the commitment is computed in the same way as in the mutator set.
-                AnnouncedUtxo {
+                IncomingUtxo {
                     utxo,
                     sender_randomness,
                     receiver_preimage,
                 }
-            })
+            }).collect()
     }
 
     /// converts a result into an Option and logs a warning on any error
     fn ok_warn<T>(&self, result: Result<T>) -> Option<T> {
+        let Some(receiver_identifier) = self.receiver_identifier() else {
+            panic!("Cannot call `ok_warn` unless the spending key has an associated address.");
+        };
         match result {
             Ok(v) => Some(v),
             Err(e) => {
-                warn!("possible loss of funds! skipping public announcement for {:?} key with receiver_identifier: {}.  error: {}", KeyType::from(self), self.receiver_identifier(), e.to_string());
+                warn!("possible loss of funds! skipping public announcement for {:?} key with receiver_identifier: {}.  error: {}", KeyType::from(self), receiver_identifier, e.to_string());
                 None
             }
         }
@@ -491,7 +559,6 @@ impl SpendingKey {
 mod test {
     use generation_address::GenerationReceivingAddress;
     use generation_address::GenerationSpendingKey;
-    use itertools::Itertools;
     use proptest_arbitrary_interop::arb;
     use rand::random;
     use rand::thread_rng;
@@ -500,7 +567,7 @@ mod test {
     use test_strategy::proptest;
 
     use super::*;
-    use crate::models::blockchain::type_scripts::neptune_coins::NeptuneCoins;
+    use crate::models::blockchain::type_scripts::native_currency_amount::NativeCurrencyAmount;
     use crate::tests::shared::make_mock_transaction;
 
     /// tests scanning for announced utxos with a symmetric key
@@ -571,8 +638,10 @@ mod test {
         /// we verify that the data matches the original/expected values.
         pub fn scan_for_announced_utxos(key: SpendingKey) {
             // 1. generate a utxo with amount = 10
-            let utxo =
-                Utxo::new_native_currency(key.to_address().lock_script(), NeptuneCoins::new(10));
+            let utxo = Utxo::new_native_currency(
+                key.to_address().unwrap().lock_script(),
+                NativeCurrencyAmount::coins(10),
+            );
 
             // 2. generate sender randomness
             let sender_randomness: Digest = random();
@@ -581,23 +650,21 @@ mod test {
             let expected_addition_record = commit(
                 Tip5::hash(&utxo),
                 sender_randomness,
-                key.to_address().privacy_digest(),
+                key.to_address().unwrap().privacy_digest(),
             );
 
             // 4. create a mock tx with no inputs or outputs
             let mut mock_tx = make_mock_transaction(vec![], vec![]);
 
             // 5. verify that no announced utxos exist for this key
-            assert!(key
-                .scan_for_announced_utxos(&mock_tx.kernel)
-                .collect_vec()
-                .is_empty());
+            assert!(key.scan_for_announced_utxos(&mock_tx.kernel).is_empty());
 
             // 6. generate a public announcement for this address
             let utxo_notification_payload =
                 UtxoNotificationPayload::new(utxo.clone(), sender_randomness);
             let public_announcement = key
                 .to_address()
+                .unwrap()
                 .generate_public_announcement(utxo_notification_payload);
 
             // 7. verify that the public_announcement is marked as our key type.
@@ -612,7 +679,7 @@ mod test {
                 .modify(mock_tx.kernel);
 
             // 9. scan tx public announcements for announced utxos
-            let announced_utxos = key.scan_for_announced_utxos(&mock_tx.kernel).collect_vec();
+            let announced_utxos = key.scan_for_announced_utxos(&mock_tx.kernel);
 
             // 10. verify there is exactly 1 announced_utxo and obtain it.
             assert_eq!(1, announced_utxos.len());
@@ -622,7 +689,10 @@ mod test {
             assert_eq!(utxo, announced_utxo.utxo);
             assert_eq!(expected_addition_record, announced_utxo.addition_record());
             assert_eq!(sender_randomness, announced_utxo.sender_randomness);
-            assert_eq!(key.privacy_preimage(), announced_utxo.receiver_preimage);
+            assert_eq!(
+                key.privacy_preimage().unwrap(),
+                announced_utxo.receiver_preimage
+            );
         }
 
         /// This tests encrypting and decrypting with a [SpendingKey]
@@ -630,8 +700,8 @@ mod test {
             let mut rng = thread_rng();
 
             // 1. create utxo with random amount
-            let amount = NeptuneCoins::new(rng.gen_range(0..42000000));
-            let utxo = Utxo::new_native_currency(key.to_address().lock_script(), amount);
+            let amount = NativeCurrencyAmount::coins(rng.gen_range(0..42000000));
+            let utxo = Utxo::new_native_currency(key.to_address().unwrap().lock_script(), amount);
 
             // 2. generate sender randomness
             let sender_randomness: Digest = random();
@@ -639,11 +709,11 @@ mod test {
             // 3. encrypt secrets (utxo, sender_randomness)
             let notification_payload =
                 UtxoNotificationPayload::new(utxo.clone(), sender_randomness);
-            let ciphertext = key.to_address().encrypt(&notification_payload);
+            let ciphertext = key.to_address().unwrap().encrypt(&notification_payload);
             println!("ciphertext.get_size() = {}", ciphertext.len() * 8);
 
             // 4. decrypt secrets
-            let (utxo_again, sender_randomness_again) = key.decrypt(&ciphertext).unwrap();
+            let (utxo_again, sender_randomness_again) = key.decrypt(&ciphertext).unwrap().unwrap();
 
             // 5. verify that decrypted secrets match original secrets
             assert_eq!(utxo, utxo_again);
@@ -667,7 +737,7 @@ mod test {
             assert!(l_and_s.halts_gracefully(msg.values().to_vec().into()));
 
             // 3. convert spending key to an address.
-            let receiving_address_again = spending_key.to_address();
+            let receiving_address_again = spending_key.to_address().unwrap();
 
             // 4. verify that both address match.
             assert_eq!(receiving_address, receiving_address_again);

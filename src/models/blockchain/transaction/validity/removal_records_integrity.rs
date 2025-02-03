@@ -39,7 +39,7 @@ use crate::models::blockchain::transaction::transaction_kernel::TransactionKerne
 use crate::models::blockchain::transaction::transaction_kernel::TransactionKernelField;
 use crate::models::blockchain::transaction::utxo::Utxo;
 use crate::models::blockchain::transaction::PrimitiveWitness;
-use crate::models::blockchain::type_scripts::neptune_coins::NeptuneCoins;
+use crate::models::blockchain::type_scripts::native_currency_amount::NativeCurrencyAmount;
 use crate::models::proof_abstractions::mast_hash::MastHash;
 use crate::models::proof_abstractions::tasm::builtins as tasmlib;
 use crate::models::proof_abstractions::tasm::program::ConsensusProgram;
@@ -72,7 +72,7 @@ pub struct RemovalRecordsIntegrityWitness {
     input_utxos: SaltedUtxos,
     membership_proofs: Vec<MsMembershipProof>,
     aocl_auth_paths: Vec<MmrMembershipProof>,
-    coinbase: Option<NeptuneCoins>,
+    coinbase: Option<NativeCurrencyAmount>,
     removal_records: Vec<RemovalRecord>,
     aocl: MmrAccumulator,
     swbfi: MmrAccumulator,
@@ -120,7 +120,7 @@ impl From<&PrimitiveWitness> for RemovalRecordsIntegrityWitness {
 #[derive(Clone, Debug, BFieldCodec, TasmObject)]
 struct RemovalRecordsIntegrityWitnessMemory {
     input_utxos: SaltedUtxos,
-    coinbase: Option<NeptuneCoins>,
+    coinbase: Option<NativeCurrencyAmount>,
     removal_records: Vec<RemovalRecord>,
     aocl: MmrAccumulator,
     swbfi: MmrAccumulator,
@@ -406,7 +406,7 @@ impl ConsensusProgram for RemovalRecordsIntegrity {
         );
 
         // authenticate coinbase against kernel mast hash
-        let coinbase: Option<NeptuneCoins> = rriw.coinbase;
+        let coinbase: Option<NativeCurrencyAmount> = rriw.coinbase;
         let coinbase_leaf: Digest = Hash::hash(&coinbase);
         tasmlib::tasmlib_hashing_merkle_verify(
             txk_digest,
@@ -1087,7 +1087,7 @@ mod tests {
     use proptest::strategy::Strategy;
     use proptest::test_runner::TestCaseResult;
     use proptest::test_runner::TestRunner;
-    use tasm_lib::hashing::merkle_verify::MERKLE_AUTHENTICATION_ROOT_MISMATCH_ERROR;
+    use tasm_lib::hashing::merkle_verify::MerkleVerify;
     use test_strategy::proptest;
 
     use super::*;
@@ -1178,7 +1178,7 @@ mod tests {
         let assertion_failure = RemovalRecordsIntegrity.test_assertion_failure(
             bad_witness.standard_input(),
             bad_witness.nondeterminism(),
-            &[MERKLE_AUTHENTICATION_ROOT_MISMATCH_ERROR],
+            &[MerkleVerify::ROOT_MISMATCH_ERROR_ID],
         );
         assert!(let Ok(_) = assertion_failure);
     }
@@ -1195,7 +1195,7 @@ mod tests {
         let assertion_failure = RemovalRecordsIntegrity.test_assertion_failure(
             bad_witness.standard_input(),
             bad_witness.nondeterminism(),
-            &[MERKLE_AUTHENTICATION_ROOT_MISMATCH_ERROR],
+            &[MerkleVerify::ROOT_MISMATCH_ERROR_ID],
         );
         assert!(let Ok(_) = assertion_failure);
     }
@@ -1208,7 +1208,7 @@ mod tests {
         let [bad_primitive_witness] =
             PrimitiveWitness::arbitrary_tuple_with_matching_mutator_sets_and_given_coinbase(
                 [(1, 1, 1)],
-                Some((NeptuneCoins::new(1), 0)),
+                Some((NativeCurrencyAmount::coins(1), 0)),
             )
             .new_tree(&mut test_runner)
             .unwrap()

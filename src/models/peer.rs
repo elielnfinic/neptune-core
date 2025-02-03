@@ -1,4 +1,6 @@
+pub(crate) mod handshake_data;
 pub mod peer_block_notifications;
+pub mod peer_info;
 pub mod transaction_notification;
 pub mod transfer_block;
 pub mod transfer_transaction;
@@ -7,6 +9,11 @@ use std::fmt::Display;
 use std::net::SocketAddr;
 use std::time::SystemTime;
 
+use handshake_data::HandshakeData;
+use itertools::Itertools;
+use num_bigint::BigUint;
+use num_traits::ToPrimitive;
+use num_traits::Zero;
 use peer_block_notifications::PeerBlockNotification;
 use rand::rngs::StdRng;
 use rand::Rng;
@@ -16,118 +23,32 @@ use serde::Deserialize;
 use serde::Serialize;
 use tasm_lib::twenty_first::prelude::Mmr;
 use tasm_lib::twenty_first::prelude::MmrMembershipProof;
+use tasm_lib::twenty_first::util_types::mmr::mmr_accumulator::MmrAccumulator;
+use tracing::debug;
 use tracing::trace;
+use tracing::warn;
 use transaction_notification::TransactionNotification;
 use transfer_transaction::TransferTransaction;
 use twenty_first::math::digest::Digest;
 
 use super::blockchain::block::block_header::BlockHeader;
+use super::blockchain::block::block_header::BlockHeaderWithBlockHashWitness;
 use super::blockchain::block::block_height::BlockHeight;
+use super::blockchain::block::difficulty_control::Difficulty;
 use super::blockchain::block::difficulty_control::ProofOfWork;
 use super::blockchain::block::Block;
 use super::channel::BlockProposalNotification;
 use super::proof_abstractions::timestamp::Timestamp;
 use super::state::transaction_kernel_id::TransactionKernelId;
 use crate::config_models::network::Network;
+use crate::models::blockchain::block::difficulty_control::max_cumulative_pow_after;
 use crate::models::peer::transfer_block::TransferBlock;
 use crate::prelude::twenty_first;
 
 pub(crate) type InstanceId = u128;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub(crate) struct PeerConnectionInfo {
-    port_for_incoming_connections: Option<u16>,
-    connected_address: SocketAddr,
-    inbound: bool,
-}
-
-impl PeerConnectionInfo {
-    pub(crate) fn new(
-        port_for_incoming_connections: Option<u16>,
-        connected_address: SocketAddr,
-        inbound: bool,
-    ) -> Self {
-        Self {
-            port_for_incoming_connections,
-            connected_address,
-            inbound,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct PeerInfo {
-    peer_connection_info: PeerConnectionInfo,
-    instance_id: InstanceId,
-    connection_established: SystemTime,
-    pub(crate) standing: PeerStanding,
-    version: String,
-    is_archival_node: bool,
-}
-
-impl PeerInfo {
-    pub(crate) fn new(
-        peer_connection_info: PeerConnectionInfo,
-        instance_id: InstanceId,
-        connection_established: SystemTime,
-        version: String,
-        is_archival_node: bool,
-        peer_tolerance: u16,
-    ) -> Self {
-        assert!(peer_tolerance > 0, "Peer tolerance must be positive");
-        let standing = PeerStanding::new(peer_tolerance);
-        Self {
-            peer_connection_info,
-            instance_id,
-            connection_established,
-            standing,
-            version,
-            is_archival_node,
-        }
-    }
-
-    pub(crate) fn with_standing(mut self, standing: PeerStanding) -> Self {
-        self.standing = standing;
-        self
-    }
-
-    pub(crate) fn instance_id(&self) -> u128 {
-        self.instance_id
-    }
-
-    pub fn standing(&self) -> PeerStanding {
-        self.standing
-    }
-
-    pub fn connected_address(&self) -> SocketAddr {
-        self.peer_connection_info.connected_address
-    }
-
-    pub fn connection_established(&self) -> SystemTime {
-        self.connection_established
-    }
-
-    pub fn is_archival_node(&self) -> bool {
-        self.is_archival_node
-    }
-
-    pub(crate) fn connection_is_inbound(&self) -> bool {
-        self.peer_connection_info.inbound
-    }
-
-    /// Return the socket address that the peer is expected to listen on. Returns `None` if peer does not accept
-    /// incoming connections.
-    pub fn listen_address(&self) -> Option<SocketAddr> {
-        self.peer_connection_info
-            .port_for_incoming_connections
-            .map(|port| SocketAddr::new(self.peer_connection_info.connected_address.ip(), port))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_connection_established(&mut self, new_timestamp: SystemTime) {
-        self.connection_established = new_timestamp;
-    }
-}
+pub(crate) const SYNC_CHALLENGE_POW_WITNESS_LENGTH: usize = 10;
+pub(crate) const SYNC_CHALLENGE_NUM_BLOCK_PAIRS: usize = 10;
 
 trait Sanction {
     fn severity(self) -> i32;
@@ -144,6 +65,8 @@ pub enum NegativePeerSanction {
     InvalidSyncChallengeResponse,
     TimedOutSyncChallengeResponse,
     UnexpectedSyncChallengeResponse,
+    FishyPowEvolutionChallengeResponse,
+    FishyDifficultiesChallengeResponse,
 
     FloodPeerListResponse,
     BlockRequestUnknownHeight,
@@ -155,8 +78,10 @@ pub enum NegativePeerSanction {
     BatchBlocksInvalidStartHeight,
     BatchBlocksUnknownRequest,
     BatchBlocksRequestEmpty,
+    BatchBlocksRequestTooManyDigests,
     InvalidTransaction,
     UnconfirmableTransaction,
+    InvalidBlockMmrAuthentication,
 
     InvalidTransferBlock,
 
@@ -221,6 +146,14 @@ impl Display for NegativePeerSanction {
             NegativePeerSanction::TimedOutSyncChallengeResponse => {
                 "timed-out sync challenge response"
             }
+            NegativePeerSanction::InvalidBlockMmrAuthentication => {
+                "invalid block mmr authentication"
+            }
+            NegativePeerSanction::BatchBlocksRequestTooManyDigests => {
+                "too many digests in batch block request"
+            }
+            NegativePeerSanction::FishyPowEvolutionChallengeResponse => "fishy pow evolution",
+            NegativePeerSanction::FishyDifficultiesChallengeResponse => "fishy difficulties",
         };
         write!(f, "{string}")
     }
@@ -264,7 +197,7 @@ impl Sanction for NegativePeerSanction {
             NegativePeerSanction::InvalidBlock(_) => -10,
             NegativePeerSanction::DifferentGenesis => i32::MIN,
             NegativePeerSanction::ForkResolutionError((_height, count, _digest)) => {
-                i32::from(count).saturating_mul(-3)
+                i32::from(count).saturating_mul(-1)
             }
             NegativePeerSanction::SynchronizationTimeout => -5,
             NegativePeerSanction::FloodPeerListResponse => -2,
@@ -288,6 +221,10 @@ impl Sanction for NegativePeerSanction {
             NegativePeerSanction::UnexpectedSyncChallengeResponse => -1,
             NegativePeerSanction::InvalidTransferBlock => -50,
             NegativePeerSanction::TimedOutSyncChallengeResponse => -50,
+            NegativePeerSanction::InvalidBlockMmrAuthentication => -4,
+            NegativePeerSanction::BatchBlocksRequestTooManyDigests => -50,
+            NegativePeerSanction::FishyPowEvolutionChallengeResponse => -51,
+            NegativePeerSanction::FishyDifficultiesChallengeResponse => -51,
         }
     }
 }
@@ -425,16 +362,6 @@ impl Display for PeerStanding {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HandshakeData {
-    pub tip_header: BlockHeader,
-    pub listen_port: Option<u16>,
-    pub network: Network,
-    pub instance_id: u128,
-    pub version: String,
-    pub is_archival_node: bool,
-}
-
 /// A message sent between peers to inform them whether the connection was
 /// accepted or refused (and if so, for what reason).
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -483,6 +410,16 @@ pub struct BlockRequestBatch {
 
     /// Indicates the maximum allowed number of blocks in the response.
     pub(crate) max_response_len: usize,
+
+    /// The block MMR accumulator of the tip of the chain which the node is
+    /// syncing towards. Its number of leafs is the block height the node is
+    /// syncing towards.
+    ///
+    /// The receiver needs this value to know which MMR authentication paths to
+    /// attach to the blocks in the response. These paths allow the receiver of
+    /// a batch of blocks to verify that the received blocks are indeed
+    /// ancestors to a given tip.
+    pub(crate) anchor: MmrAccumulator,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -506,7 +443,7 @@ pub(crate) enum PeerMessage {
     BlockRequestByHash(Digest),
 
     BlockRequestBatch(BlockRequestBatch), // TODO: Consider restricting this in size
-    BlockResponseBatch(Vec<TransferBlock>), // TODO: Consider restricting this in size
+    BlockResponseBatch(Vec<(TransferBlock, MmrMembershipProof)>), // TODO: Consider restricting this in size
     UnableToSatisfyBatchRequest,
 
     SyncChallenge(SyncChallenge),
@@ -659,7 +596,10 @@ impl IssuedSyncChallenge {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct SyncChallenge {
     pub(crate) tip_digest: Digest,
-    pub(crate) challenges: [BlockHeight; 10],
+
+    /// Block heights of the child blocks, for which the peer must respond with
+    /// (parent, child) blocks. Assumed to be ordered from small to big.
+    pub(crate) challenges: [BlockHeight; SYNC_CHALLENGE_NUM_BLOCK_PAIRS],
 }
 
 impl SyncChallenge {
@@ -722,6 +662,9 @@ impl SyncChallenge {
             heights.push(height);
         }
 
+        // sort from small to big as that makes some validation checks easier.
+        heights.sort();
+
         Self {
             tip_digest: block_notification.hash,
             challenges: heights.try_into().unwrap(),
@@ -731,22 +674,49 @@ impl SyncChallenge {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct SyncChallengeResponse {
-    pub(crate) tip: TransferBlock,
+    /// (parent, child) blocks. blocks are assumed to be ordered from small to
+    /// big block height.
+    pub(crate) blocks: [(TransferBlock, TransferBlock); SYNC_CHALLENGE_NUM_BLOCK_PAIRS],
+
+    /// Membership proof of the child blocks, relative to the tip-MMR (after
+    /// appending digest of tip). Must match ordering of blocks.
+    pub(crate) membership_proofs: [MmrMembershipProof; SYNC_CHALLENGE_NUM_BLOCK_PAIRS],
+
     pub(crate) tip_parent: TransferBlock,
-    pub(crate) blocks: [(TransferBlock, TransferBlock); 10],
-    pub(crate) membership_proofs: [MmrMembershipProof; 10],
+    pub(crate) tip: TransferBlock,
+
+    /// Pow-witnesses from tip and X blocks back, in reverse-chronological
+    /// order. So a witness to the `tip` hash should be the 1st element in this
+    /// array.
+    pub(crate) pow_witnesses: [BlockHeaderWithBlockHashWitness; SYNC_CHALLENGE_POW_WITNESS_LENGTH],
 }
 
 impl SyncChallengeResponse {
+    fn pow_witnesses_form_chain_from_tip(
+        tip_digest: Digest,
+        pow_witnesses: &[BlockHeaderWithBlockHashWitness; SYNC_CHALLENGE_POW_WITNESS_LENGTH],
+    ) -> bool {
+        let tip_header_with_witness = &pow_witnesses[0];
+        let mut is_chain_from_tip = tip_header_with_witness.hash() == tip_digest;
+        for (child, parent) in pow_witnesses.iter().tuple_windows() {
+            is_chain_from_tip &= child.is_successor_of(parent);
+        }
+
+        is_chain_from_tip
+    }
+
     /// Determine whether the `SyncChallengeResponse` answers the given
     /// `IssuedSyncChallenge`, and not some other one.
     pub(crate) fn matches(&self, issued_challenge: IssuedSyncChallenge) -> bool {
-        let Ok(tip_predecessor) = Block::try_from(self.tip_parent.clone()) else {
+        let Ok(tip_parent) = Block::try_from(self.tip_parent.clone()) else {
             return false;
         };
         let Ok(tip) = Block::try_from(self.tip.clone()) else {
             return false;
         };
+
+        let pow_witnesses_form_chain_from_tip =
+            Self::pow_witnesses_form_chain_from_tip(tip.hash(), &self.pow_witnesses);
 
         self.blocks
             .iter()
@@ -754,7 +724,8 @@ impl SyncChallengeResponse {
             .all(|((_, child), challenge_height)| child.header.height == *challenge_height)
             && issued_challenge.challenge.tip_digest == tip.hash()
             && issued_challenge.accumulated_pow == tip.header().cumulative_proof_of_work
-            && tip.has_proof_of_work(tip_predecessor.header())
+            && tip.has_proof_of_work(tip_parent.header())
+            && pow_witnesses_form_chain_from_tip
     }
 
     /// Determine whether the proofs in `SyncChallengeResponse` are valid. Also
@@ -772,6 +743,8 @@ impl SyncChallengeResponse {
             return false;
         }
 
+        let mut mmra_anchor = tip.body().block_mmr_accumulator.to_owned();
+        mmra_anchor.append(tip.hash());
         for ((parent, child), membership_proof) in
             self.blocks.iter().zip(self.membership_proofs.iter())
         {
@@ -781,8 +754,8 @@ impl SyncChallengeResponse {
             if !membership_proof.verify(
                 child.header().height.into(),
                 child.hash(),
-                &tip.body().block_mmr_accumulator.peaks(),
-                tip.header().height.into(),
+                &mmra_anchor.peaks(),
+                mmra_anchor.num_leafs(),
             ) {
                 return false;
             }
@@ -797,5 +770,191 @@ impl SyncChallengeResponse {
         }
 
         true
+    }
+
+    /// Determine whether the claimed evolution of the cumulative proof-of-work
+    /// is a) possible, and b) likely, given the difficulties.
+    pub(crate) fn check_pow(&self, network: Network, own_tip_height: BlockHeight) -> bool {
+        let genesis_header = BlockHeader::genesis(network);
+        let parent_triples = [(
+            genesis_header.height,
+            genesis_header.cumulative_proof_of_work,
+            genesis_header.difficulty,
+        )]
+        .into_iter()
+        .chain(self.blocks.iter().map(|(child, _parent)| {
+            (
+                child.header.height,
+                child.header.cumulative_proof_of_work,
+                child.header.difficulty,
+            )
+        }))
+        .chain([(
+            self.tip_parent.header.height,
+            self.tip_parent.header.cumulative_proof_of_work,
+            self.tip_parent.header.difficulty,
+        )])
+        .collect_vec();
+        let cumulative_pow_evolution_okay = parent_triples.iter().copied().tuple_windows().all(
+            |((start_height, start_cpow, start_difficulty), (stop_height, stop_cpow, _))| {
+                let max_pow = max_cumulative_pow_after(
+                    start_cpow,
+                    start_difficulty,
+                    (stop_height - start_height)
+                        .try_into()
+                        .expect("difference of block heights guaranteed to be non-negative"),
+                );
+                // cpow must increase for each block, and is upward-bounded. But
+                // since response may contain duplicates, allow equality.
+                max_pow >= stop_cpow && start_cpow <= stop_cpow
+            },
+        );
+
+        let first = self.blocks[0].0.header;
+        let last = self.tip.header;
+        let total_pow_increase = BigUint::from(last.cumulative_proof_of_work)
+            - BigUint::from(first.cumulative_proof_of_work);
+        let span = last.height - first.height;
+        let average_difficulty = total_pow_increase.to_f64().unwrap() / (span as f64);
+        debug_assert!(
+            average_difficulty > 0.0,
+            "Average difficulty must be positive. Got: {average_difficulty}"
+        );
+
+        // In principle, the cumulative proof-of-work could have been boosted by
+        // a small number of outlying large difficulties. We require here that
+        // "enough" observed difficulties are above this average. This strategy
+        // is a heuristic and its use implies false positives: some evolutions
+        // will be flagged as fishy, even though they came about legally.
+        //
+        // To quantify the heuristic somewhat: Suppose we are okay with assuming
+        // that for all honest responders 10% of the difficulties must be larger
+        // than the mean; and otherwise the node should flag the sync challenge
+        // response as fishy. Then the probability of observing k above-mean
+        // difficulties out of a random selection of 22, is
+        //   {22 choose k} * (0.1)^k * (0.9)^(22-k) .
+        // And in particular:
+        //   k: probability
+        //   ----------------------
+        //   0: 0.09847709021836118
+        //   1: 0.24072177608932735
+        //   2: 0.28084207210421525
+        //   3: 0.20803116452164094
+        //   4: 0.10979422571975492
+        //   5: 0.043917690287901975 .
+        //
+        // The tip is included in the below check, so if *it* doesn't have an
+        // above average difficulty, something is almost certainly off.
+
+        let too_few_above_mean_difficulties = !own_tip_height.is_genesis()
+            && self
+                .blocks
+                .iter()
+                .flat_map(|(l, r)| [l, r])
+                .chain([&self.tip_parent, &self.tip])
+                .map(|b| b.header.difficulty)
+                .filter(|d| BigUint::from(*d).to_f64().unwrap() >= average_difficulty)
+                .count()
+                == 0;
+
+        if too_few_above_mean_difficulties {
+            warn!("Too few above mean difficulties.");
+        }
+
+        if !cumulative_pow_evolution_okay {
+            warn!("Impossible evolution of cumulative pow.");
+            for (start, stop) in parent_triples.into_iter().tuple_windows() {
+                let upper_bound = max_cumulative_pow_after(
+                    start.1,
+                    start.2,
+                    (stop.0 - start.0).try_into().unwrap(),
+                );
+                debug!(
+                    "start ({} / {} / {}) -> stop ({} / {} / {}) with max {}",
+                    start.0, start.1, start.2, stop.0, stop.1, stop.2, upper_bound
+                );
+            }
+        }
+
+        cumulative_pow_evolution_okay && !too_few_above_mean_difficulties
+    }
+
+    /// Check whether the claimed difficulties are large enough relative to that
+    /// of our own tip.
+    ///
+    /// Sum all verified difficulties and verify that this number is larger than
+    /// our own tip difficulty. This inequality guarantees that the successful
+    /// attacker must have spent at least one block's worth of guessing power to
+    /// produce the malicious chain, and probably much more.
+    pub(crate) fn check_difficulty(&self, own_tip_difficulty: Difficulty) -> bool {
+        let own_tip_difficulty = ProofOfWork::zero() + own_tip_difficulty;
+        let mut fork_relative_cumpow = ProofOfWork::zero();
+        for (_parent, child) in self.blocks.iter() {
+            fork_relative_cumpow = fork_relative_cumpow + child.header.difficulty;
+        }
+
+        fork_relative_cumpow > own_tip_difficulty
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rand::random;
+    use rand::thread_rng;
+
+    use super::*;
+    use crate::models::blockchain::block::block_header::HeaderToBlockHashWitness;
+    use crate::models::blockchain::block::Block;
+    use crate::tests::shared::fake_valid_sequence_of_blocks_for_tests;
+
+    #[tokio::test]
+    async fn sync_challenge_response_pow_witnesses_must_be_a_chain() {
+        let genesis = Block::genesis(Network::Main);
+        let mut rng = thread_rng();
+        let ten_blocks: [Block; SYNC_CHALLENGE_POW_WITNESS_LENGTH] =
+            fake_valid_sequence_of_blocks_for_tests(&genesis, Timestamp::minutes(20), rng.gen())
+                .await;
+
+        let to_pow_witness = |block: &Block| {
+            BlockHeaderWithBlockHashWitness::new(
+                *block.header(),
+                HeaderToBlockHashWitness::from(block),
+            )
+        };
+
+        let mut i = SYNC_CHALLENGE_POW_WITNESS_LENGTH;
+        let mut block;
+        let mut valid_pow_chain = vec![];
+        while valid_pow_chain.len() < SYNC_CHALLENGE_POW_WITNESS_LENGTH {
+            i -= 1;
+            block = &ten_blocks[i];
+            valid_pow_chain.push(to_pow_witness(block));
+        }
+
+        let tip = &ten_blocks[SYNC_CHALLENGE_POW_WITNESS_LENGTH - 1];
+        let valid_pow_chain: [BlockHeaderWithBlockHashWitness; SYNC_CHALLENGE_POW_WITNESS_LENGTH] =
+            valid_pow_chain.try_into().unwrap();
+        assert!(SyncChallengeResponse::pow_witnesses_form_chain_from_tip(
+            tip.hash(),
+            &valid_pow_chain
+        ));
+
+        for j in 0..SYNC_CHALLENGE_POW_WITNESS_LENGTH {
+            let mut invalid_pow_chain = valid_pow_chain.clone();
+            invalid_pow_chain[j].header.prev_block_digest = random();
+            assert!(!SyncChallengeResponse::pow_witnesses_form_chain_from_tip(
+                tip.hash(),
+                &invalid_pow_chain
+            ));
+        }
+
+        for j in 0..SYNC_CHALLENGE_POW_WITNESS_LENGTH {
+            let mut invalid_pow_chain = valid_pow_chain.clone();
+            invalid_pow_chain[j].header.nonce = random();
+            assert!(!SyncChallengeResponse::pow_witnesses_form_chain_from_tip(
+                tip.hash(),
+                &invalid_pow_chain
+            ));
+        }
     }
 }

@@ -19,11 +19,11 @@ use crate::config_models::data_directory::DataDirectory;
 use crate::config_models::network::Network;
 use crate::database::create_db_if_missing;
 use crate::database::storage::storage_schema::traits::*;
-use crate::database::storage::storage_schema::DbtVec;
-use crate::database::storage::storage_schema::SimpleRustyStorage;
 use crate::database::NeptuneLevelDb;
 use crate::database::WriteBatchAsync;
 use crate::models::blockchain::block::block_header::BlockHeader;
+use crate::models::blockchain::block::block_header::BlockHeaderWithBlockHashWitness;
+use crate::models::blockchain::block::block_header::HeaderToBlockHashWitness;
 use crate::models::blockchain::block::block_height::BlockHeight;
 use crate::models::blockchain::block::mutator_set_update::MutatorSetUpdate;
 use crate::models::blockchain::block::Block;
@@ -36,13 +36,11 @@ use crate::models::database::FileRecord;
 use crate::models::database::LastFileRecord;
 use crate::prelude::twenty_first;
 use crate::util_types::mutator_set::addition_record::AdditionRecord;
-use crate::util_types::mutator_set::archival_mmr::ArchivalMmr;
 use crate::util_types::mutator_set::mutator_set_accumulator::MutatorSetAccumulator;
 use crate::util_types::mutator_set::removal_record::AbsoluteIndexSet;
 use crate::util_types::mutator_set::removal_record::RemovalRecord;
 use crate::util_types::mutator_set::rusty_archival_mutator_set::RustyArchivalMutatorSet;
-
-type ArchivalBlockMmr = ArchivalMmr<DbtVec<Digest>>;
+use crate::util_types::rusty_archival_block_mmr::RustyArchivalBlockMmr;
 
 pub(crate) const BLOCK_INDEX_DB_NAME: &str = "block_index";
 pub(crate) const MUTATOR_SET_DIRECTORY_NAME: &str = "mutator_set";
@@ -79,7 +77,7 @@ pub(crate) struct ArchivalState {
     pub(crate) archival_mutator_set: RustyArchivalMutatorSet,
 
     /// Archival-MMR of the block digests belonging to the canonical chain.
-    pub(crate) archival_block_mmr: ArchivalBlockMmr,
+    pub(crate) archival_block_mmr: RustyArchivalBlockMmr,
 }
 
 // The only reason we have this `Debug` implementation is that it's required
@@ -145,7 +143,7 @@ impl ArchivalState {
 
     pub(crate) async fn initialize_archival_block_mmr(
         data_dir: &DataDirectory,
-    ) -> Result<ArchivalBlockMmr> {
+    ) -> Result<RustyArchivalBlockMmr> {
         let abmmr_dir_path = data_dir.archival_block_mmr_dir_path();
         DataDirectory::create_dir_if_not_exists(&abmmr_dir_path).await?;
 
@@ -168,17 +166,7 @@ impl ArchivalState {
             }
         };
 
-        let mut storage = SimpleRustyStorage::new_with_callback(
-            db,
-            "archival-block-mmr-Schema",
-            crate::LOG_TOKIO_LOCK_EVENT_CB,
-        );
-
-        // We do not need a sync-label since the last leaf of the MMR will
-        // be the sync-label, i.e., the block digest of the latest block added.
-        let abmmr = storage.schema.new_vec::<Digest>("archival_block_mmr").await;
-
-        let archival_bmmr = ArchivalBlockMmr::new(abmmr).await;
+        let archival_bmmr = RustyArchivalBlockMmr::connect(db).await;
 
         Ok(archival_bmmr)
     }
@@ -250,10 +238,10 @@ impl ArchivalState {
         data_dir: DataDirectory,
         block_index_db: NeptuneLevelDb<BlockIndexKey, BlockIndexValue>,
         mut archival_mutator_set: RustyArchivalMutatorSet,
-        mut archival_block_mmr: ArchivalBlockMmr,
+        mut archival_block_mmr: RustyArchivalBlockMmr,
         network: Network,
     ) -> Self {
-        let genesis_block = Box::new(Block::genesis_block(network));
+        let genesis_block = Box::new(Block::genesis(network));
 
         // If archival mutator set is empty, populate it with the addition records from genesis block
         // This assumes genesis block doesn't spend anything -- which it can't so that should be OK.
@@ -270,8 +258,11 @@ impl ArchivalState {
         }
 
         // Add genesis block digest to archival MMR, if empty.
-        if archival_block_mmr.is_empty().await {
-            archival_block_mmr.append(genesis_block.hash()).await;
+        if archival_block_mmr.ammr().is_empty().await {
+            archival_block_mmr
+                .ammr_mut()
+                .append(genesis_block.hash())
+                .await;
         }
 
         Self {
@@ -287,158 +278,154 @@ impl ArchivalState {
         &self.genesis_block
     }
 
-    /// Write a newly found block to database and to disk, and set it as tip.
+    /// Write a block disk, without setting it as tip. The returned (key, value)
+    /// pairs must be stored to the block-index database for this block to be
+    /// retrievable.
     ///
-    /// If block was already written to database, then it is only marked as
-    /// tip, and no write to disk occurs. Instead, the old block database entry
-    /// is assumed to be valid, and so is the block stored on disk.
-    pub(crate) async fn write_block_as_tip(&mut self, new_block: &Block) -> Result<()> {
-        async fn write_block(
-            archival_state: &mut ArchivalState,
-            new_block: &Block,
-        ) -> Result<Vec<(BlockIndexKey, BlockIndexValue)>> {
-            // Fetch last file record to find disk location to store block.
-            // This record must exist in the DB already, unless this is the first block
-            // stored on disk.
-            let mut last_rec: LastFileRecord = archival_state
-                .block_index_db
-                .get(BlockIndexKey::LastFile)
-                .await
-                .map(|x| x.as_last_file_record())
-                .unwrap_or_default();
+    /// The caller should verify that the block is not already stored, otherwise
+    /// the block will be stored twice which will lead to inconsistencies.
+    async fn store_block(
+        self: &mut ArchivalState,
+        new_block: &Block,
+    ) -> Result<Vec<(BlockIndexKey, BlockIndexValue)>> {
+        // Fetch last file record to find disk location to store block.
+        // This record must exist in the DB already, unless this is the first block
+        // stored on disk.
+        let mut last_rec: LastFileRecord = self
+            .block_index_db
+            .get(BlockIndexKey::LastFile)
+            .await
+            .map(|x| x.as_last_file_record())
+            .unwrap_or_default();
 
-            // Open the file that was last used for storing a block
-            let mut block_file_path = archival_state.data_dir.block_file_path(last_rec.last_file);
-            let serialized_block: Vec<u8> = bincode::serialize(new_block)?;
-            let serialized_block_size: u64 = serialized_block.len() as u64;
+        // Open the file that was last used for storing a block
+        let mut block_file_path = self.data_dir.block_file_path(last_rec.last_file);
+        let serialized_block: Vec<u8> = bincode::serialize(new_block)?;
+        let serialized_block_size: u64 = serialized_block.len() as u64;
 
-            // file operations are async.
+        let mut block_file = DataDirectory::open_ensure_parent_dir_exists(&block_file_path).await?;
 
-            let mut block_file =
-                DataDirectory::open_ensure_parent_dir_exists(&block_file_path).await?;
-
-            // Check if we should use the last file, or we need a new one.
-            if new_block_file_is_needed(&block_file, serialized_block_size).await {
-                last_rec = LastFileRecord {
-                    last_file: last_rec.last_file + 1,
-                };
-                block_file_path = archival_state.data_dir.block_file_path(last_rec.last_file);
-                block_file = DataDirectory::open_ensure_parent_dir_exists(&block_file_path).await?;
-            }
-
-            debug!("Writing block to: {}", block_file_path.display());
-            // Get associated file record from database, otherwise create it
-            let file_record_key: BlockIndexKey = BlockIndexKey::File(last_rec.last_file);
-            let file_record_value: Option<FileRecord> = archival_state
-                .block_index_db
-                .get(file_record_key.clone())
-                .await
-                .map(|x| x.as_file_record());
-            let file_record_value: FileRecord = match file_record_value {
-                Some(record) => record.add(serialized_block_size, new_block.header()),
-                None => {
-                    assert!(
-                        block_file.metadata().await.unwrap().len().is_zero(),
-                        "If no file record exists, block file must be empty"
-                    );
-                    FileRecord::new(serialized_block_size, new_block.header())
-                }
+        // Check if we should use the last file, or we need a new one.
+        if new_block_file_is_needed(&block_file, serialized_block_size).await {
+            last_rec = LastFileRecord {
+                last_file: last_rec.last_file + 1,
             };
+            block_file_path = self.data_dir.block_file_path(last_rec.last_file);
+            block_file = DataDirectory::open_ensure_parent_dir_exists(&block_file_path).await?;
+        }
 
-            // Make room in file for mmapping and record where block starts
-            let pos = block_file.seek(SeekFrom::End(0)).await.unwrap();
-            debug!("Size of file prior to block writing: {}", pos);
-            block_file
-                .seek(SeekFrom::Current(serialized_block_size as i64 - 1))
-                .await
-                .unwrap();
-            block_file.write_all(&[0]).await.unwrap();
-            let file_offset: u64 = block_file
-                .seek(SeekFrom::Current(-(serialized_block_size as i64)))
-                .await
-                .unwrap();
-            debug!(
-                "New file size: {} bytes",
-                block_file.metadata().await.unwrap().len()
-            );
+        debug!("Writing block to: {}", block_file_path.display());
+        // Get associated file record from database, otherwise create it
+        let file_record_key: BlockIndexKey = BlockIndexKey::File(last_rec.last_file);
+        let file_record_value: Option<FileRecord> = self
+            .block_index_db
+            .get(file_record_key.clone())
+            .await
+            .map(|x| x.as_file_record());
+        let file_record_value: FileRecord = match file_record_value {
+            Some(record) => record.add(serialized_block_size, new_block.header()),
+            None => {
+                assert!(
+                    block_file.metadata().await.unwrap().len().is_zero(),
+                    "If no file record exists, block file must be empty"
+                );
+                FileRecord::new(serialized_block_size, new_block.header())
+            }
+        };
 
-            let height_record_key = BlockIndexKey::Height(new_block.header().height);
-            let mut blocks_at_same_height: Vec<Digest> = match archival_state
-                .block_index_db
-                .get(height_record_key.clone())
-                .await
-            {
+        // Make room in file for mmapping and record where block starts
+        let pos = block_file.seek(SeekFrom::End(0)).await.unwrap();
+        debug!("Size of file prior to block writing: {}", pos);
+        block_file
+            .seek(SeekFrom::Current(serialized_block_size as i64 - 1))
+            .await
+            .unwrap();
+        block_file.write_all(&[0]).await.unwrap();
+        let file_offset: u64 = block_file
+            .seek(SeekFrom::Current(-(serialized_block_size as i64)))
+            .await
+            .unwrap();
+        debug!(
+            "New file size: {} bytes",
+            block_file.metadata().await.unwrap().len()
+        );
+
+        let height_record_key = BlockIndexKey::Height(new_block.header().height);
+        let mut blocks_at_same_height: Vec<Digest> =
+            match self.block_index_db.get(height_record_key.clone()).await {
                 Some(rec) => rec.as_height_record(),
                 None => vec![],
             };
 
-            // Write to file with mmap, only map relevant part of file into memory
-            // we use spawn_blocking to make the blocking mmap async-friendly.
-            tokio::task::spawn_blocking(move || {
-                let mmap = unsafe {
-                    MmapOptions::new()
-                        .offset(pos)
-                        .len(serialized_block_size as usize)
-                        .map(&block_file)
-                        .unwrap()
-                };
-                let mut mmap: memmap2::MmapMut = mmap.make_mut().unwrap();
-                mmap.deref_mut()[..].copy_from_slice(&serialized_block);
-            })
-            .await?;
+        // Write to file with mmap, only map relevant part of file into memory
+        // we use spawn_blocking to make the blocking mmap async-friendly.
+        tokio::task::spawn_blocking(move || {
+            let mmap = unsafe {
+                MmapOptions::new()
+                    .offset(pos)
+                    .len(serialized_block_size as usize)
+                    .map(&block_file)
+                    .unwrap()
+            };
+            let mut mmap: memmap2::MmapMut = mmap.make_mut().unwrap();
+            mmap.deref_mut()[..].copy_from_slice(&serialized_block);
+        })
+        .await?;
 
-            // Update block index database with newly stored block
-            let mut block_index_entries: Vec<(BlockIndexKey, BlockIndexValue)> = vec![];
-            let block_record_key: BlockIndexKey = BlockIndexKey::Block(new_block.hash());
-            let num_additions: u64 = new_block
-                .mutator_set_update()
-                .additions
-                .len()
-                .try_into()
-                .expect("Num addition records cannot exceed u64::MAX");
-            let block_record_value: BlockIndexValue =
-                BlockIndexValue::Block(Box::new(BlockRecord {
-                    block_header: new_block.header().clone(),
-                    file_location: BlockFileLocation {
-                        file_index: last_rec.last_file,
-                        offset: file_offset,
-                        block_length: serialized_block_size as usize,
-                    },
-                    min_aocl_index: new_block.mutator_set_accumulator_after().aocl.num_leafs()
-                        - num_additions,
-                    num_additions,
-                }));
+        // Update block index database with newly stored block
+        let mut block_index_entries: Vec<(BlockIndexKey, BlockIndexValue)> = vec![];
+        let block_record_key: BlockIndexKey = BlockIndexKey::Block(new_block.hash());
+        let num_additions: u64 = new_block
+            .mutator_set_update()
+            .additions
+            .len()
+            .try_into()
+            .expect("Num addition records cannot exceed u64::MAX");
+        let block_record_value: BlockIndexValue = BlockIndexValue::Block(Box::new(BlockRecord {
+            block_header: *new_block.header(),
+            file_location: BlockFileLocation {
+                file_index: last_rec.last_file,
+                offset: file_offset,
+                block_length: serialized_block_size as usize,
+            },
+            min_aocl_index: new_block.mutator_set_accumulator_after().aocl.num_leafs()
+                - num_additions,
+            num_additions,
+            block_hash_witness: HeaderToBlockHashWitness::from(new_block),
+        }));
 
-            block_index_entries.push((file_record_key, BlockIndexValue::File(file_record_value)));
-            block_index_entries.push((block_record_key, block_record_value));
+        block_index_entries.push((file_record_key, BlockIndexValue::File(file_record_value)));
+        block_index_entries.push((block_record_key, block_record_value));
 
-            block_index_entries
-                .push((BlockIndexKey::LastFile, BlockIndexValue::LastFile(last_rec)));
-            blocks_at_same_height.push(new_block.hash());
-            block_index_entries.push((
-                height_record_key,
-                BlockIndexValue::Height(blocks_at_same_height),
-            ));
+        block_index_entries.push((BlockIndexKey::LastFile, BlockIndexValue::LastFile(last_rec)));
+        blocks_at_same_height.push(new_block.hash());
+        block_index_entries.push((
+            height_record_key,
+            BlockIndexValue::Height(blocks_at_same_height),
+        ));
 
-            Ok(block_index_entries)
-        }
+        Ok(block_index_entries)
+    }
 
-        let block_is_new = self.get_block_header(new_block.hash()).await.is_none();
+    async fn write_block_internal(&mut self, block: &Block, is_canonical_tip: bool) -> Result<()> {
+        let block_is_new = self.get_block_header(block.hash()).await.is_none();
         let mut block_index_entries = if block_is_new {
-            write_block(self, new_block).await?
+            self.store_block(block).await?
         } else {
             warn!(
                 "Attempted to store block but block was already stored.\nBlock digest: {}",
-                new_block.hash()
+                block.hash()
             );
             vec![]
         };
 
-        // Mark block as tip
-        block_index_entries.push((
-            BlockIndexKey::BlockTipDigest,
-            BlockIndexValue::BlockTipDigest(new_block.hash()),
-        ));
+        // Mark block as tip, conditionally
+        if is_canonical_tip {
+            block_index_entries.push((
+                BlockIndexKey::BlockTipDigest,
+                BlockIndexValue::BlockTipDigest(block.hash()),
+            ));
+        }
 
         let mut batch = WriteBatchAsync::new();
         for (k, v) in block_index_entries.into_iter() {
@@ -450,20 +437,40 @@ impl ArchivalState {
         Ok(())
     }
 
+    /// Write a newly found block to database and to disk, without setting it as
+    /// tip.
+    ///
+    /// If block was already written to database, then this is a nop as the old
+    /// database entries and block stored on disk are considered valid.
+    pub(crate) async fn write_block_not_tip(&mut self, block: &Block) -> Result<()> {
+        self.write_block_internal(block, false).await
+    }
+
+    /// Write a newly found block to database and to disk, and set it as tip.
+    ///
+    /// If block was already written to database, then it is only marked as
+    /// tip, and no write to disk occurs. Instead, the old block database entry
+    /// is assumed to be valid, and so is the block stored on disk.
+    pub(crate) async fn write_block_as_tip(&mut self, new_block: &Block) -> Result<()> {
+        self.write_block_internal(new_block, true).await
+    }
+
     /// Add a new block as tip for the archival block MMR.
     ///
     /// All predecessors of this block must be known and stored in the block
     /// index database for this update to work.
-    pub(crate) async fn add_to_archival_block_mmr(&mut self, new_block: &Block) {
+    pub(crate) async fn append_to_archival_block_mmr(&mut self, new_block: &Block) {
         // Roll back to length of parent (accounting for genesis block),
         // then add new digest.
         let num_leafs_prior_to_this_block = new_block.header().height.into();
         self.archival_block_mmr
+            .ammr_mut()
             .prune_to_num_leafs(num_leafs_prior_to_this_block)
             .await;
 
         let latest_leaf = self
             .archival_block_mmr
+            .ammr()
             .get_latest_leaf()
             .await
             .expect("block MMR must always have at least one leaf");
@@ -472,22 +479,28 @@ impl ArchivalState {
                 .find_path(latest_leaf, new_block.header().prev_block_digest)
                 .await;
             for _ in backwards {
-                self.archival_block_mmr.remove_last_leaf_async().await;
+                self.archival_block_mmr
+                    .ammr_mut()
+                    .remove_last_leaf_async()
+                    .await;
             }
             for digest in forwards {
-                self.archival_block_mmr.append(digest).await;
+                self.archival_block_mmr.ammr_mut().append(digest).await;
             }
         }
 
         assert_eq!(
             new_block.header().prev_block_digest,
-            self.archival_block_mmr
+            self.archival_block_mmr.ammr()
                 .get_latest_leaf()
                 .await
                 .expect("block MMR must always have at least one leaf"),
             "Archival block-MMR must be in a consistent state. Try deleting this database to have it rebuilt."
         );
-        self.archival_block_mmr.append(new_block.hash()).await;
+        self.archival_block_mmr
+            .ammr_mut()
+            .append(new_block.hash())
+            .await;
     }
 
     async fn get_block_from_block_record(&self, block_record: BlockRecord) -> Result<Block> {
@@ -628,6 +641,7 @@ impl ArchivalState {
             let new_guess_height = BlockHeight::arithmetic_mean(min_block_height, max_block_height);
             block_hash = self
                 .archival_block_mmr
+                .ammr()
                 .get_leaf_async(new_guess_height.into())
                 .await;
             record = self
@@ -760,10 +774,29 @@ impl ArchivalState {
 
         // If no block was found, check if digest is genesis digest
         if ret.is_none() && block_digest == self.genesis_block.hash() {
-            ret = Some(self.genesis_block.header().clone());
+            ret = Some(*self.genesis_block.header());
         }
 
         ret
+    }
+
+    /// Returns the block header with a witness to the block hash if that block
+    /// is known.
+    ///
+    /// Returns `None` if the block is not known *or* if the block is the
+    /// genesis block, as the genesis block does not need a witness for its
+    /// hash.
+    pub(crate) async fn block_header_with_hash_witness(
+        &self,
+        block_digest: Digest,
+    ) -> Option<BlockHeaderWithBlockHashWitness> {
+        self.block_index_db
+            .get(BlockIndexKey::Block(block_digest))
+            .await
+            .map(|x| {
+                let record = x.as_block_record();
+                BlockHeaderWithBlockHashWitness::new(record.block_header, record.block_hash_witness)
+            })
     }
 
     // Return the block with a given block digest, iff it's available in state somewhere.
@@ -819,6 +852,7 @@ impl ArchivalState {
         let block_height: u64 = block_header.height.into();
 
         self.archival_block_mmr
+            .ammr()
             .try_get_leaf(block_height)
             .await
             .is_some_and(|canonical_digest_at_this_height| {
@@ -1132,7 +1166,7 @@ mod archival_state_tests {
     use crate::models::blockchain::block::block_header::MINIMUM_BLOCK_TIME;
     use crate::models::blockchain::transaction::lock_script::LockScript;
     use crate::models::blockchain::transaction::utxo::Utxo;
-    use crate::models::blockchain::type_scripts::neptune_coins::NeptuneCoins;
+    use crate::models::blockchain::type_scripts::native_currency_amount::NativeCurrencyAmount;
     use crate::models::proof_abstractions::timestamp::Timestamp;
     use crate::models::state::archival_state::ArchivalState;
     use crate::models::state::tx_proving_capability::TxProvingCapability;
@@ -1175,7 +1209,7 @@ mod archival_state_tests {
 
         let mut archival_state0 = make_test_archival_state(network).await;
 
-        let b = Block::genesis_block(network);
+        let b = Block::genesis(network);
         let some_wallet_secret = WalletSecret::new_random();
         let some_key = some_wallet_secret.nth_generation_spending_key_for_tests(0);
 
@@ -1200,7 +1234,7 @@ mod archival_state_tests {
         let archival_state = make_test_archival_state(network).await;
 
         assert_eq!(
-            Block::genesis_block(network)
+            Block::genesis(network)
                 .kernel
                 .body
                 .transaction_kernel
@@ -1216,12 +1250,12 @@ mod archival_state_tests {
         );
 
         assert_eq!(
-            Block::genesis_block(network).hash(),
+            Block::genesis(network).hash(),
             archival_state.archival_mutator_set.get_sync_label().await,
             "AMS must be synced to genesis block after initialization from genesis block"
         );
 
-        for (i, tx_output) in Block::genesis_block(network)
+        for (i, tx_output) in Block::genesis(network)
             .kernel
             .body
             .transaction_kernel
@@ -1300,7 +1334,7 @@ mod archival_state_tests {
             .wallet_secret
             .nth_generation_spending_key(0);
 
-        let genesis_block = Block::genesis_block(network);
+        let genesis_block = Block::genesis(network);
         let (block1, _) = make_mock_block(&genesis_block, None, alice_key, rng.gen()).await;
 
         alice.set_new_tip(block1.clone()).await.unwrap();
@@ -1320,7 +1354,10 @@ mod archival_state_tests {
 
         // Add an input to the next block's transaction. This will add a removal record
         // to the block, and this removal record will insert indices in the Bloom filter.
-        let utxo = Utxo::new_native_currency(LockScript::anyone_can_spend(), NeptuneCoins::new(4));
+        let utxo = Utxo::new_native_currency(
+            LockScript::anyone_can_spend(),
+            NativeCurrencyAmount::coins(4),
+        );
 
         let tx_output_anyone_can_spend =
             TxOutput::no_notification(utxo, rng.gen(), rng.gen(), false);
@@ -1331,7 +1368,7 @@ mod archival_state_tests {
                 vec![tx_output_anyone_can_spend].into(),
                 alice_key.into(),
                 UtxoNotificationMedium::OnChain,
-                NeptuneCoins::new(2),
+                NativeCurrencyAmount::coins(2),
                 in_seven_months,
                 TxProvingCapability::PrimitiveWitness,
                 &TritonVmJobQueue::dummy(),
@@ -1339,13 +1376,8 @@ mod archival_state_tests {
             .await
             .unwrap();
 
-        let mock_block_2 = Block::block_template_invalid_proof(
-            &block1,
-            sender_tx,
-            in_seven_months,
-            Digest::default(),
-            None,
-        );
+        let mock_block_2 =
+            Block::block_template_invalid_proof(&block1, sender_tx, in_seven_months, None);
 
         // Remove an element from the mutator set, verify that the active window DB is updated.
         alice.set_new_tip(mock_block_2.clone()).await.unwrap();
@@ -1418,21 +1450,21 @@ mod archival_state_tests {
         let alice_address = alice_key.to_address();
         let mut alice =
             mock_genesis_global_state(network, 42, alice_wallet, cli_args::Args::default()).await;
-        let genesis_block = Block::genesis_block(network);
+        let genesis_block = Block::genesis(network);
 
         let num_premine_utxos = Block::premine_utxos(network).len();
 
         let outputs = (0..20)
             .map(|_| {
                 TxOutput::onchain_native_currency(
-                    NeptuneCoins::new(1),
+                    NativeCurrencyAmount::coins(1),
                     rng.gen(),
                     alice_address.into(),
                     false,
                 )
             })
             .collect_vec();
-        let fee = NeptuneCoins::zero();
+        let fee = NativeCurrencyAmount::zero();
 
         let in_seven_months = Timestamp::now() + Timestamp::months(7);
         let (big_tx, _) = alice
@@ -1512,7 +1544,7 @@ mod archival_state_tests {
         let network = Network::RegTest;
         let mut rng = thread_rng();
         let alice_wallet = WalletSecret::devnet_wallet();
-        let genesis_block = Block::genesis_block(network);
+        let genesis_block = Block::genesis(network);
         let alice_key = alice_wallet.nth_generation_spending_key_for_tests(0);
         let alice_address = alice_key.to_address();
         let mut alice =
@@ -1524,14 +1556,14 @@ mod archival_state_tests {
         let outputs = (0..20)
             .map(|_| {
                 TxOutput::onchain_native_currency(
-                    NeptuneCoins::new(1),
+                    NativeCurrencyAmount::coins(1),
                     rng.gen(),
                     alice_address.into(),
                     false,
                 )
             })
             .collect_vec();
-        let fee = NeptuneCoins::zero();
+        let fee = NativeCurrencyAmount::zero();
 
         let num_blocks = 30;
         for _ in 0..num_blocks {
@@ -1728,7 +1760,7 @@ mod archival_state_tests {
             mock_genesis_global_state(network, 3, wallet_secret_bob, cli_args::Args::default())
                 .await;
 
-        let genesis_block = Block::genesis_block(network);
+        let genesis_block = Block::genesis(network);
         let launch_date = genesis_block.header().timestamp;
         let in_seven_months = launch_date + Timestamp::months(7);
 
@@ -1739,13 +1771,13 @@ mod archival_state_tests {
         let alice_address = alice_spending_key.to_address();
         let receiver_data_for_alice = vec![
             TxOutput::offchain_native_currency(
-                NeptuneCoins::new(1),
+                NativeCurrencyAmount::coins(1),
                 sender_randomness,
                 alice_address.into(),
                 false,
             ),
             TxOutput::offchain_native_currency(
-                NeptuneCoins::new(9),
+                NativeCurrencyAmount::coins(9),
                 sender_randomness,
                 alice_address.into(),
                 false,
@@ -1757,13 +1789,13 @@ mod archival_state_tests {
 
         let receiver_data_for_bob = vec![
             TxOutput::offchain_native_currency(
-                NeptuneCoins::new(2),
+                NativeCurrencyAmount::coins(2),
                 sender_randomness,
                 bob_address.into(),
                 false,
             ),
             TxOutput::offchain_native_currency(
-                NeptuneCoins::new(3),
+                NativeCurrencyAmount::coins(3),
                 sender_randomness,
                 bob_address.into(),
                 false,
@@ -1771,14 +1803,15 @@ mod archival_state_tests {
         ];
 
         println!("Before tx creation");
-        let fee = NeptuneCoins::new(1);
+        let fee = NativeCurrencyAmount::coins(1);
         let change_key = premine_rec
             .global_state_lock
             .lock_guard_mut()
             .await
             .wallet_state
             .next_unused_spending_key(KeyType::Symmetric)
-            .await;
+            .await
+            .unwrap();
         let (tx_to_alice_and_bob, change_utxo) = premine_rec
             .lock_guard()
             .await
@@ -1813,6 +1846,7 @@ mod archival_state_tests {
             guesser_fraction,
             in_seven_months,
             TxProvingCapability::SingleProof,
+            TritonVmJobPriority::Normal.into(),
         )
         .await
         .unwrap();
@@ -1832,7 +1866,6 @@ mod archival_state_tests {
             &genesis_block,
             block_tx,
             in_seven_months,
-            Digest::default(),
             None,
             &TritonVmJobQueue::dummy(),
             TritonVmJobPriority::default().into(),
@@ -1912,7 +1945,7 @@ mod archival_state_tests {
 
         // Check balances
         assert_eq!(
-            NeptuneCoins::new(10),
+            NativeCurrencyAmount::coins(10),
             alice
                 .lock_guard()
                 .await
@@ -1921,7 +1954,7 @@ mod archival_state_tests {
                 .synced_unspent_liquid_amount(in_seven_months)
         );
         assert_eq!(
-            NeptuneCoins::new(5),
+            NativeCurrencyAmount::coins(5),
             bob.lock_guard()
                 .await
                 .get_wallet_status_for_tip()
@@ -1937,7 +1970,7 @@ mod archival_state_tests {
             // premine + block_reward / 2 - sent_to_alice - sent_to_bob - tx-fee
             // = 20 + 64 - 10 - 5 - 1
             // = 68
-            liquid_reward + NeptuneCoins::new(20 - 10 - 5 - 1),
+            liquid_reward + NativeCurrencyAmount::coins(20 - 10 - 5 - 1),
             premine_rec
                 .lock_guard()
                 .await
@@ -1948,7 +1981,7 @@ mod archival_state_tests {
 
         let after_cb_timelock_expiration = block_1.header().timestamp + Timestamp::months(37);
         assert_eq!(
-            block_subsidy + NeptuneCoins::new(20 - 10 - 5 - 1),
+            block_subsidy + NativeCurrencyAmount::coins(20 - 10 - 5 - 1),
             premine_rec
                 .lock_guard()
                 .await
@@ -1964,13 +1997,13 @@ mod archival_state_tests {
         let premine_rec_addr = premine_rec_spending_key.to_address();
         let outputs_from_alice: TxOutputList = vec![
             TxOutput::offchain_native_currency(
-                NeptuneCoins::new(1),
+                NativeCurrencyAmount::coins(1),
                 rng.gen(),
                 premine_rec_addr.into(),
                 false,
             ),
             TxOutput::offchain_native_currency(
-                NeptuneCoins::new(8),
+                NativeCurrencyAmount::coins(8),
                 rng.gen(),
                 premine_rec_addr.into(),
                 false,
@@ -1991,7 +2024,7 @@ mod archival_state_tests {
                 outputs_from_alice.clone(),
                 alice_change_key,
                 UtxoNotificationMedium::OffChain,
-                NeptuneCoins::new(1),
+                NativeCurrencyAmount::coins(1),
                 in_seven_months,
                 TxProvingCapability::SingleProof,
                 &TritonVmJobQueue::dummy(),
@@ -2004,19 +2037,19 @@ mod archival_state_tests {
         );
         let outputs_from_bob: TxOutputList = vec![
             TxOutput::offchain_native_currency(
-                NeptuneCoins::new(1),
+                NativeCurrencyAmount::coins(1),
                 rng.gen(),
                 premine_rec_addr.into(),
                 false,
             ),
             TxOutput::offchain_native_currency(
-                NeptuneCoins::new(1),
+                NativeCurrencyAmount::coins(1),
                 rng.gen(),
                 premine_rec_addr.into(),
                 false,
             ),
             TxOutput::offchain_native_currency(
-                NeptuneCoins::new(2),
+                NativeCurrencyAmount::coins(2),
                 rng.gen(),
                 premine_rec_addr.into(),
                 false,
@@ -2037,7 +2070,7 @@ mod archival_state_tests {
                 outputs_from_bob.clone(),
                 bob_change_key,
                 UtxoNotificationMedium::OffChain,
-                NeptuneCoins::new(1),
+                NativeCurrencyAmount::coins(1),
                 in_seven_months,
                 TxProvingCapability::SingleProof,
                 &TritonVmJobQueue::dummy(),
@@ -2066,6 +2099,7 @@ mod archival_state_tests {
             guesser_fraction,
             in_seven_months,
             TxProvingCapability::SingleProof,
+            TritonVmJobPriority::Normal.into(),
         )
         .await
         .unwrap();
@@ -2090,7 +2124,6 @@ mod archival_state_tests {
             &block_1,
             block_tx2,
             in_seven_months + MINIMUM_BLOCK_TIME,
-            Digest::default(),
             None,
             &TritonVmJobQueue::dummy(),
             TritonVmJobPriority::default().into(),
@@ -2264,6 +2297,26 @@ mod archival_state_tests {
             );
             assert_eq!(mock_block_2, archival_state.get_tip().await);
             assert_eq!(mock_block_1, archival_state.get_tip_parent().await.unwrap());
+
+            assert_eq!(
+                mock_block_2.hash(),
+                archival_state
+                    .archival_block_mmr
+                    .ammr()
+                    .try_get_leaf(mock_block_2.header().height.into())
+                    .await
+                    .unwrap(),
+                "Block Height must be valid leaf index in archival block-MMR"
+            );
+            assert!(
+                archival_state
+                    .archival_block_mmr
+                    .ammr()
+                    .try_get_leaf(mock_block_2.header().height.next().into())
+                    .await
+                    .is_none(),
+                "Tip height plus 1 must translate into an out-of-bounds leaf index in block-MMR"
+            );
         }
 
         Ok(())
@@ -2390,7 +2443,7 @@ mod archival_state_tests {
         let wallet = WalletSecret::new_random();
         let mut rng = thread_rng();
         let mut archival_state = make_test_archival_state(network).await;
-        let mut current_block = Block::genesis_block(network);
+        let mut current_block = Block::genesis(network);
         let genesis_msa = current_block.mutator_set_accumulator_after().clone();
         let compose_beneficiary = wallet.nth_generation_spending_key_for_tests(0);
         for _block_height in 1..=5 {
@@ -2434,7 +2487,7 @@ mod archival_state_tests {
         let wallet = WalletSecret::new_random();
         let mut rng = thread_rng();
         let mut archival_state = make_test_archival_state(network).await;
-        let mut current_block = Block::genesis_block(network);
+        let mut current_block = Block::genesis(network);
         let compose_beneficiary = wallet.nth_generation_spending_key_for_tests(0);
         let mut blocks = vec![current_block.clone()];
         let mut min_aocl_index = 0u64;
@@ -2526,9 +2579,9 @@ mod archival_state_tests {
     async fn find_canonical_block_with_output_genesis_block_test() {
         let network = Network::Main;
         let archival_state = make_test_archival_state(network).await;
-        let genesis_block = Block::genesis_block(network);
+        let genesis_block = Block::genesis(network);
 
-        let addition_records = Block::genesis_block(network)
+        let addition_records = Block::genesis(network)
             .body()
             .transaction_kernel
             .outputs
@@ -2563,7 +2616,7 @@ mod archival_state_tests {
         let network = Network::Main;
         let wallet = WalletSecret::new_random();
         let mut archival_state = make_test_archival_state(network).await;
-        let genesis_block = Block::genesis_block(network);
+        let genesis_block = Block::genesis(network);
         let genesis_msa = &genesis_block.mutator_set_accumulator_after();
         let compose_beneficiary = wallet.nth_generation_spending_key_for_tests(0);
 
@@ -2607,7 +2660,7 @@ mod archival_state_tests {
         let network = Network::Main;
         let wallet = WalletSecret::new_random();
         let mut archival_state = make_test_archival_state(network).await;
-        let genesis_block = Block::genesis_block(network);
+        let genesis_block = Block::genesis(network);
         let genesis_msa = &genesis_block.mutator_set_accumulator_after();
         let cb_beneficiary = wallet.nth_generation_spending_key_for_tests(0);
 
@@ -3527,5 +3580,59 @@ mod archival_state_tests {
         let _rams = ArchivalState::initialize_mutator_set(&data_dir)
             .await
             .unwrap();
+    }
+
+    mod block_hash_witness {
+        use super::*;
+        use crate::tests::shared::fake_valid_sequence_of_blocks_for_tests;
+
+        #[traced_test]
+        #[tokio::test]
+        async fn stored_block_hash_witness_agrees_with_block_hash() {
+            let network = Network::Main;
+            let mut rng = thread_rng();
+            let mut archival_state = make_test_archival_state(network).await;
+            let genesis_block = Block::genesis(network);
+            let blocks: [Block; 3] = fake_valid_sequence_of_blocks_for_tests(
+                &genesis_block,
+                Timestamp::now(),
+                rng.gen(),
+            )
+            .await;
+            for block in blocks.iter() {
+                archival_state.write_block_as_tip(block).await.unwrap();
+            }
+
+            for block in blocks.iter() {
+                let block_digest = block.hash();
+                let stored_record = archival_state
+                    .block_index_db
+                    .get(BlockIndexKey::Block(block_digest))
+                    .await
+                    .unwrap()
+                    .as_block_record();
+                assert_eq!(
+                    block.hash(),
+                    BlockHeaderWithBlockHashWitness::new(
+                        stored_record.block_header,
+                        stored_record.block_hash_witness
+                    )
+                    .hash(),
+                    "Block hash from stored witness must agree with block hash for block height {}",
+                    block.header().height
+                );
+
+                let block_header_with_block_hash_witness = archival_state
+                    .block_header_with_hash_witness(block_digest)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    block.hash(),
+                    block_header_with_block_hash_witness.hash(),
+                    "Block hash from stored witness must agree with block hash for block height {}",
+                    block.header().height
+                );
+            }
+        }
     }
 }
