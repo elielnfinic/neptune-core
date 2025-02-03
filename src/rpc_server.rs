@@ -1322,14 +1322,14 @@ pub trait RPC {
     /// The coins receiving address
     /// let address = ReceivingAddress::from("0x347834DSFDDS".to_string());
     /// 
-    /// let owned_utxo_notify_method : UtxoNotificationMedium = ;
+    /// let notify_self : UtxoNotificationMedium = ;
     /// 
-    /// let unowned_utxo_notify_medium : UtxoNotificationMedium = ;
+    /// let notify_other : UtxoNotificationMedium = ;
     /// 
     /// let fee : NeptuneCoins = NeptuneCoins::new(10);
     /// 
     /// // neptune-core server sends token to a single receipient
-    /// let send_result = client.send(context::current(), token, amount, address, owned_utxo_notify_method, unowned_utxo_notify_medium).await.unwrap().unwrap();
+    /// let send_result = client.send(context::current(), token, amount, address, notify_self, notify_other).await.unwrap().unwrap();
     /// 
     /// # })
     /// ```
