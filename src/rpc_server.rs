@@ -1297,6 +1297,7 @@ pub trait RPC {
     /// ```no_run
     /// use neptune_cash::models::blockchain::type_scripts::neptune_coins::NeptuneCoins;
     /// use neptune_cash::models::state::wallet::address::ReceivingAddress;
+    /// use neptune_cash::models::state::wallet::utxo_notification::UtxoNotificationMedium;
     /// use neptune_cash::rpc_server::RPCClient;
     /// use neptune_cash::rpc_auth;
     /// use tarpc::tokio_serde::formats::Json;
@@ -1383,6 +1384,7 @@ pub trait RPC {
     /// ```no_run
     /// use neptune_cash::models::blockchain::type_scripts::neptune_coins::NeptuneCoins;
     /// use neptune_cash::models::state::wallet::address::ReceivingAddress;
+    /// use neptune_cash::models::state::wallet::utxo_notification::UtxoNotificationMedium;
     /// use neptune_cash::rpc_server::RPCClient;
     /// use neptune_cash::rpc_auth;
     /// use tarpc::tokio_serde::formats::Json;
