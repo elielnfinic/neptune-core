@@ -1182,6 +1182,7 @@ pub trait RPC {
     ///
     /// # })
     /// ```
+
     async fn block_intervals(
         token: rpc_auth::Token,
         last_block: BlockSelector,
@@ -1647,10 +1648,7 @@ impl NeptuneRPCServer {
     /// Return temperature of CPU, if available.
     fn cpu_temp_inner() -> Option<f32> {
         let current_system = System::new();
-        match current_system.cpu_temp() {
-            Ok(temp) => Some(temp),
-            Err(_) => None,
-        }
+        current_system.cpu_temp().ok()
     }
 
     async fn send_to_many_inner_with_mock_proof_option(
@@ -2286,11 +2284,7 @@ impl RPC for NeptuneRPCServer {
         log_slow_scope!(fn_name!());
         token.auth(&self.valid_tokens)?;
 
-        let ret = if let Ok(address) = ReceivingAddress::from_bech32m(&address_string, network) {
-            Some(address)
-        } else {
-            None
-        };
+        let ret = ReceivingAddress::from_bech32m(&address_string, network).ok();
         tracing::debug!(
             "Responding to address validation request of {address_string}: {}",
             ret.is_some()
@@ -2927,7 +2921,13 @@ impl RPC for NeptuneRPCServer {
             .archival_state()
             .get_block_header(current.prev_block_digest)
             .await;
-        while parent.is_some() && max_num_blocks.is_none_or(|max_num| max_num > intervals.len()) {
+
+        // Exclude genesis since it was not mined. So block interval 0-->1
+        // is not included.
+        while parent.is_some()
+            && !parent.unwrap().height.is_genesis()
+            && max_num_blocks.is_none_or(|max_num| max_num > intervals.len())
+        {
             let parent_ = parent.unwrap();
             let interval = current.timestamp.to_millis() - parent_.timestamp.to_millis();
             let block_height: u64 = current.height.into();
